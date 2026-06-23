@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-multichannel (slug: multichannel)
+  A multichannel-array panner for the Spatial I (multichannel & diffusion) session,
+  and the production companion to demo-spatial-panner (which is the binaural HRTF
+  explorer). Where that demo places one source around YOUR HEAD over headphones,
+  this one places a source on the 8-channel WinterBang loudspeaker RING and shows
+  the array craft the students actually perform: amplitude panning and diffusion.
+
+  A single source (a repeating noise burst, which localizes far better than a
+  steady tone) is sent to eight speaker gains arranged in a circle. The gains use
+  real 2D vector-base amplitude panning (VBAP): only the two speakers bracketing
+  the source direction are driven, and their gains are normalized to constant
+  power (the sum of squares stays at 1), so the panned source holds its loudness
+  as it travels around the ring. Move the source with the azimuth slider or by
+  dragging on the array; press Diffuse to send it on a performed trajectory and
+  watch the speaker gains light up, which is exactly what a diffusionist does live.
+
+  Because a laptop has two speakers, the eight array channels are folded down to a
+  stereo image for monitoring (each speaker panned to its horizontal position), so
+  a flat stereo fold collapses front from back; the real array does not. That gap
+  is the point of the concert format.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe> (deploy +
+  UBC iframe domain allow-listing still pending). Browsers suspend the AudioContext
+  until a user gesture and a cross-origin iframe cannot rely on autoplay, so audio
+  NEVER starts on load: the Start button calls audioContext.resume() from inside.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Spatial I (8-channel array panner)</title>
+<style>
+  :root {
+    --accent: #1D4ED8;        /* technical-track accent */
+    --cult: #9333EA;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 22px; margin-top: 4px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .stage { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; touch-action: none; }
+  .reading { font-size: 13px; color: var(--muted); }
+  .reading b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  .hp { color: var(--warm); font-weight: 600; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<div class="demo">
+  <h1>Spatial I: place a sound on the 8-channel array</h1>
+  <p class="instructions">
+    One source is sent to <strong>eight loudspeakers</strong> arranged in a ring, the format of the WinterBang concert.
+    The source is panned with <strong>amplitude panning</strong> (VBAP): only the two speakers nearest its direction are
+    driven, with the loudness held constant as it moves. Set its position with the slider or by dragging on the array, then
+    press <strong>Diffuse</strong> to send it on a performed trajectory. <span class="hp">Use stereo speakers or headphones.</span>
+    Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play source</button>
+      <button id="diffuse" type="button" disabled>&#8635; Diffuse (perform a path)</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: place and move the source</legend>
+    <div class="stage">
+      <div>
+        <canvas id="array" width="260" height="260" aria-label="Top-down view of the eight-speaker ring and the source"></canvas>
+        <p class="reading" id="reading"></p>
+      </div>
+      <div style="flex:1; min-width:260px;">
+        <div class="controls">
+          <div class="ctl">
+            <label for="az">Azimuth <span class="val" id="az-v">+45&deg; (toward speaker 2)</span></label>
+            <input id="az" type="range" min="-180" max="180" step="1" value="45">
+          </div>
+          <div class="ctl">
+            <label for="rate">Source: burst rate <span class="val" id="rate-v">2.5 / s</span></label>
+            <input id="rate" type="range" min="0.5" max="6" step="0.1" value="2.5">
+          </div>
+          <div class="ctl">
+            <label for="speed">Diffusion speed <span class="val" id="speed-v">medium</span></label>
+            <input id="speed" type="range" min="0.2" max="3" step="0.1" value="1">
+          </div>
+        </div>
+        <p class="note" id="gains-note"></p>
+      </div>
+    </div>
+  </fieldset>
+
+  <p class="note">
+    Watch the gains as the source moves: only the nearest pair is ever driven, and they crossfade so the
+    <strong>total power stays at 1</strong>, which is why a panned source does not get louder or softer as it travels.
+    The stereo fold for your laptop collapses front and back onto one line; in the real ring those are different speakers,
+    which is what the concert format gives you.
+  </p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, source = null, noiseBuffer = null;
+  var spkGain = [], spkPan = [];
+  var playing = false, diffusing = false;
+  var burstTimer = null, drawReq = null, diffuseT = 0;
+  var params = { az: 45, rate: 2.5, speed: 1 };
+
+  var N = 8;
+  // Speaker math-angles: speaker k at 90 - 45*k degrees. k0 = front (up).
+  var spkAngle = [];
+  for (var k = 0; k < N; k++) spkAngle.push((90 - 45 * k) * Math.PI / 180);
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---------- VBAP: constant-power pairwise gains for a source azimuth ----------
+  // az in degrees, 0 = front (toward speaker 1), positive clockwise (toward the
+  // right). Returns an array of 8 gains; only the bracketing pair is non-zero.
+  function vbapGains(azDeg) {
+    var g = new Array(N).fill(0);
+    var a = (90 - azDeg) * Math.PI / 180;          // source math-angle
+    var px = Math.cos(a), py = Math.sin(a);
+    for (var i = 0; i < N; i++) {
+      var j = (i + 1) % N;
+      var l1x = Math.cos(spkAngle[i]), l1y = Math.sin(spkAngle[i]);
+      var l2x = Math.cos(spkAngle[j]), l2y = Math.sin(spkAngle[j]);
+      var det = l1x * l2y - l2x * l1y;
+      if (Math.abs(det) < 1e-9) continue;
+      // Solve p = g1*l1 + g2*l2  ->  [g1,g2] = inv([l1 l2]) p
+      var g1 = (px * l2y - py * l2x) / det;
+      var g2 = (l1x * py - l1y * px) / det;
+      if (g1 >= -1e-6 && g2 >= -1e-6) {             // the bracketing pair
+        g1 = Math.max(g1, 0); g2 = Math.max(g2, 0);
+        var norm = Math.sqrt(g1 * g1 + g2 * g2) || 1;
+        g[i] = g1 / norm; g[j] = g2 / norm;
+        break;
+      }
+    }
+    return g;
+  }
+
+  function applyGains() {
+    var g = vbapGains(params.az);
+    var t = ctx ? ctx.currentTime + 0.02 : 0;
+    for (var k = 0; k < N; k++) {
+      if (spkGain[k]) spkGain[k].gain.linearRampToValueAtTime(g[k], t);
+    }
+    // readout
+    var parts = [];
+    for (var m = 0; m < N; m++) if (g[m] > 1e-3) parts.push("spk " + (m + 1) + " = " + g[m].toFixed(2));
+    $("gains-note").innerHTML = "Active: <b>" + (parts.join(", ") || "none") +
+      "</b>. Total power = " + Math.sqrt(g.reduce(function (s, x) { return s + x * x; }, 0)).toFixed(2) + ".";
+    return g;
+  }
+
+  // ---------- source: a short filtered noise burst ----------
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 0.5);
+    var buf = ctx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function fireBurst() {
+    if (!ctx) return;
+    var now = ctx.currentTime;
+    var src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+    var bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.frequency.value = 1400; bp.Q.value = 0.7;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.9, now + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0008, now + 0.16);
+    src.connect(bp).connect(g);
+    for (var k = 0; k < N; k++) g.connect(spkGain[k]);
+    src.start(now); src.stop(now + 0.2);
+  }
+
+  function startBursts() {
+    stopBursts();
+    burstTimer = setInterval(fireBurst, 1000 / params.rate);
+    fireBurst();
+  }
+  function stopBursts() { if (burstTimer) { clearInterval(burstTimer); burstTimer = null; } }
+
+  // ---------- audio graph: 8 speaker gains -> stereo pan by position ----------
+  function buildGraph() {
+    for (var k = 0; k < N; k++) {
+      var gain = ctx.createGain(); gain.gain.value = 0;
+      var pan = ctx.createStereoPanner();
+      // Pan each speaker to its horizontal position (cos of math-angle = x).
+      pan.pan.value = Math.max(-1, Math.min(1, Math.cos(spkAngle[k])));
+      gain.connect(pan).connect(master);
+      spkGain.push(gain); spkPan.push(pan);
+    }
+  }
+
+  // ---------- array drawing (top-down) ----------
+  function drawArray() {
+    var c = $("array"), g = c.getContext("2d");
+    var W = c.width, H = c.height, cx = W / 2, cy = H / 2, R = 96;
+    g.clearRect(0, 0, W, H);
+    var gains = vbapGains(params.az);
+
+    // reference ring
+    g.strokeStyle = "#D4D4D8"; g.lineWidth = 1;
+    g.beginPath(); g.arc(cx, cy, R, 0, 2 * Math.PI); g.stroke();
+
+    // listener
+    g.fillStyle = "#1A1A1A"; g.beginPath(); g.arc(cx, cy, 10, 0, 2 * Math.PI); g.fill();
+    g.beginPath(); g.moveTo(cx, cy - 10); g.lineTo(cx - 4, cy - 16); g.lineTo(cx + 4, cy - 16); g.closePath(); g.fill();
+
+    // source position (az: 0 front/up, clockwise)
+    var sa = (90 - params.az) * Math.PI / 180;
+    var srcR = R * 0.62;
+    var sx = cx + Math.cos(sa) * srcR;
+    var sy = cy - Math.sin(sa) * srcR;
+
+    // rays to active speakers
+    for (var k = 0; k < N; k++) {
+      var ex = cx + Math.cos(spkAngle[k]) * R;
+      var ey = cy - Math.sin(spkAngle[k]) * R;
+      if (gains[k] > 1e-3) {
+        g.strokeStyle = "#15803D"; g.lineWidth = 1 + 3 * gains[k];
+        g.beginPath(); g.moveTo(sx, sy); g.lineTo(ex, ey); g.stroke();
+      }
+    }
+    // speakers
+    for (var s = 0; s < N; s++) {
+      var x = cx + Math.cos(spkAngle[s]) * R;
+      var y = cy - Math.sin(spkAngle[s]) * R;
+      var on = gains[s] > 1e-3;
+      g.fillStyle = on ? "#15803D" : "#F4F4F5";
+      g.strokeStyle = "#1A1A1A"; g.lineWidth = 1;
+      g.globalAlpha = on ? (0.4 + 0.6 * gains[s]) : 1;
+      g.fillRect(x - 9, y - 7, 18, 14); g.strokeRect(x - 9, y - 7, 18, 14);
+      g.globalAlpha = 1;
+      var lx = cx + Math.cos(spkAngle[s]) * (R + 18);
+      var ly = cy - Math.sin(spkAngle[s]) * (R + 18);
+      g.fillStyle = "#1A1A1A"; g.font = "bold 12px sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(String(s + 1), lx, ly);
+    }
+    // source star
+    g.fillStyle = "#C2410C";
+    g.beginPath();
+    for (var p = 0; p < 10; p++) {
+      var ang = Math.PI / 2 + p * Math.PI / 5;
+      var rr = (p % 2 === 0) ? 9 : 4;
+      var ptx = sx + Math.cos(ang) * rr, pty = sy - Math.sin(ang) * rr;
+      if (p === 0) g.moveTo(ptx, pty); else g.lineTo(ptx, pty);
+    }
+    g.closePath(); g.fill();
+  }
+
+  function updateReading() {
+    var near = params.az === 0 ? "front (spk 1)" : (params.az > 0 ? "clockwise / right" : "counter-clockwise / left");
+    var fb = (Math.abs(params.az) > 90) ? ", toward the rear" : "";
+    $("reading").innerHTML = "source direction <b>" + params.az + "&deg;</b> (" + near + fb + ")";
+  }
+
+  function refresh() { if (ctx) applyGains(); drawArray(); updateReading(); }
+
+  // ---------- diffusion animation (a performed trajectory) ----------
+  function diffuseStep() {
+    if (!diffusing) return;
+    diffuseT += 0.012 * params.speed;
+    // azimuth sweeps round; a gentle in/out keeps it from being a flat circle.
+    var az = ((diffuseT * 130) % 360);
+    if (az > 180) az -= 360;
+    params.az = Math.round(az);
+    $("az").value = params.az;
+    $("az-v").textContent = azLabel(params.az);
+    refresh();
+    drawReq = requestAnimationFrame(diffuseStep);
+  }
+
+  function azLabel(a) {
+    var near;
+    var idx = Math.round(((90 - a) % 360 + 360) % 360 / 45) % 8;  // nearest speaker index
+    near = "toward speaker " + (idx + 1);
+    return (a > 0 ? "+" : "") + a + "° (" + near + ")";
+  }
+
+  // ---------- canvas drag to place the source ----------
+  function pointerAz(ev) {
+    var c = $("array"), r = c.getBoundingClientRect();
+    var px = (ev.clientX - r.left) - c.width / 2;
+    var py = (ev.clientY - r.top) - c.height / 2;
+    var mathAng = Math.atan2(-py, px) * 180 / Math.PI;   // 0 = right, 90 = up
+    var az = Math.round(90 - mathAng);
+    while (az > 180) az -= 360; while (az < -180) az += 360;
+    return az;
+  }
+  var dragging = false;
+  function placeFrom(ev) {
+    params.az = pointerAz(ev);
+    $("az").value = params.az; $("az-v").textContent = azLabel(params.az);
+    refresh();
+  }
+  $("array").addEventListener("pointerdown", function (ev) { dragging = true; placeFrom(ev); ev.preventDefault(); });
+  window.addEventListener("pointermove", function (ev) { if (dragging) placeFrom(ev); });
+  window.addEventListener("pointerup", function () { dragging = false; });
+
+  // ---------- control binding ----------
+  $("az").addEventListener("input", function () {
+    params.az = +this.value; $("az-v").textContent = azLabel(params.az); refresh();
+  });
+  $("rate").addEventListener("input", function () {
+    params.rate = +this.value; $("rate-v").textContent = (+this.value).toFixed(1) + " / s";
+    if (playing) startBursts();
+  });
+  $("speed").addEventListener("input", function () {
+    params.speed = +this.value;
+    $("speed-v").textContent = this.value < 0.7 ? "slow" : (this.value > 1.7 ? "fast" : "medium");
+  });
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.9; Shell.connectMaster(ctx, master, {bypassLimiter:true});
+      noiseBuffer = buildNoise();
+      buildGraph();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("diffuse").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then move the source or press Diffuse.");
+      refresh();
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true; startBursts();
+      $("play").innerHTML = "&#9632; Stop source";
+      setStatus("Playing. Drag the source on the ring, or press Diffuse to perform a path.");
+    } else {
+      playing = false; stopBursts();
+      $("play").innerHTML = "&#9658; Play source";
+      setStatus("Stopped.");
+    }
+  });
+
+  $("diffuse").addEventListener("click", function () {
+    if (!ctx) return;
+    diffusing = !diffusing;
+    if (diffusing) {
+      $("diffuse").innerHTML = "&#9632; Stop diffusion";
+      drawReq = requestAnimationFrame(diffuseStep);
+    } else {
+      $("diffuse").innerHTML = "&#8635; Diffuse (perform a path)";
+      if (drawReq) cancelAnimationFrame(drawReq);
+    }
+  });
+
+  // ---------- init ----------
+  $("az-v").textContent = azLabel(params.az);
+  drawArray();
+  updateReading();
+})();
+</script>
+</body>
+</html>

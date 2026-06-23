@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-additive (slug: additive)
+  Additive synthesis: set the amplitude of the first eight harmonics and hear the
+  tone they sum to, while the resulting time-domain WAVESHAPE is drawn live. The
+  partial-to-waveshape relationship is made visible: the harmonic bars on the
+  right build the single-cycle waveform on the left.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step:
+  open by double-clicking this file. Hosted on GitHub Pages and embedded into the
+  Canvas page via an <iframe> (deploy + UBC iframe domain allow-listing still
+  pending). Browsers suspend the AudioContext until a user gesture and a
+  cross-origin iframe cannot rely on autoplay, so audio NEVER starts on load:
+  the Start button calls audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Additive synthesis (build a waveshape from harmonics)</title>
+<style>
+  :root {
+    --accent: #1D4ED8;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: #FFFFFF;
+    line-height: 1.5;
+  }
+  .demo { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    margin: 0 0 16px;
+  }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.preset { font-size: 14px; }
+  .harmonics { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .harm { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 64px; }
+  .harm label { font-size: 12px; color: var(--muted); }
+  .harm .amp { font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text); font-weight: 600; }
+  input[type=range][orient=vertical] {
+    -webkit-appearance: slider-vertical; appearance: slider-vertical;
+    width: 24px; height: 110px; accent-color: var(--accent);
+  }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; margin: 8px 0 0; }
+  .scopes { display: flex; gap: 16px; flex-wrap: wrap; }
+  .scopebox { flex: 1; min-width: 260px; }
+  .scopebox h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 4px; }
+  canvas { width: 100%; height: 170px; border: 1px solid var(--border); border-radius: 8px; display: block; background: #FFFFFF; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<div class="demo">
+  <h1>Additive synthesis: build a waveshape from harmonics</h1>
+  <p class="instructions">
+    Set the amplitude of the first eight <strong>harmonics</strong> with the sliders. The synth
+    sums those sine partials into one tone, and the single-cycle <strong>waveshape</strong> they
+    build is drawn on the left as the <strong>harmonic spectrum</strong> on the right changes. Press
+    Start to enable sound, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: set the harmonic amplitudes (drawbars)</legend>
+    <div class="harmonics" id="harmonics"></div>
+    <div class="row" style="margin-top:14px;">
+      <button id="preset-saw" class="preset" type="button">Preset: sawtooth (1/n)</button>
+      <button id="preset-square" class="preset" type="button">Preset: square (odd 1/n)</button>
+      <button id="preset-odd" class="preset" type="button">Preset: odd harmonics only</button>
+      <button id="preset-sine" class="preset" type="button">Preset: pure sine</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>What you are building</legend>
+    <div class="scopes">
+      <div class="scopebox">
+        <h2>Waveshape (one cycle, time domain)</h2>
+        <canvas id="wave" width="540" height="170" aria-hidden="true"></canvas>
+      </div>
+      <div class="scopebox">
+        <h2>Harmonic spectrum (the partial amplitudes)</h2>
+        <canvas id="spectrum" width="540" height="170" aria-hidden="true"></canvas>
+      </div>
+    </div>
+    <p class="status" id="readout">The waveshape on the left is the sum of the harmonic bars on the right.</p>
+  </fieldset>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var N = 8;                 // number of harmonics / drawbars
+  var FUND = 220;            // fundamental frequency, Hz
+  var amps = [1, 0, 0, 0, 0, 0, 0, 0];  // current harmonic amplitudes (0..1)
+
+  var ctx = null, master = null, periodicVoice = null, playing = false;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---- build the drawbar sliders ----
+  var harmWrap = $("harmonics");
+  var sliders = [];
+  for (var i = 0; i < N; i++) {
+    (function (idx) {
+      var cell = document.createElement("div");
+      cell.className = "harm";
+      var val = document.createElement("span");
+      val.className = "amp";
+      val.textContent = amps[idx].toFixed(2);
+      var slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = "0"; slider.max = "1"; slider.step = "0.01";
+      slider.value = String(amps[idx]);
+      slider.setAttribute("orient", "vertical");
+      slider.setAttribute("aria-label", "harmonic " + (idx + 1) + " amplitude");
+      var label = document.createElement("label");
+      label.textContent = "h" + (idx + 1) + (idx === 0 ? " (fund.)" : "");
+      slider.addEventListener("input", function (e) {
+        amps[idx] = +e.target.value;
+        val.textContent = amps[idx].toFixed(2);
+        redraw();
+        if (playing) rebuildVoice();
+      });
+      cell.appendChild(val);
+      cell.appendChild(slider);
+      cell.appendChild(label);
+      harmWrap.appendChild(cell);
+      sliders.push({ slider: slider, val: val });
+    })(i);
+  }
+
+  function setAmps(next) {
+    for (var i = 0; i < N; i++) {
+      amps[i] = next[i] || 0;
+      sliders[i].slider.value = String(amps[i]);
+      sliders[i].val.textContent = amps[i].toFixed(2);
+    }
+    redraw();
+    if (playing) rebuildVoice();
+  }
+
+  // ---- presets (analytic Fourier amplitudes) ----
+  function sawAmps() { var a = []; for (var n = 1; n <= N; n++) a.push(1 / n); return a; }
+  function squareAmps() { var a = []; for (var n = 1; n <= N; n++) a.push(n % 2 === 1 ? 1 / n : 0); return a; }
+  function oddAmps() { var a = []; for (var n = 1; n <= N; n++) a.push(n % 2 === 1 ? 0.7 / Math.ceil(n / 2) : 0); return a; }
+  function sineAmps() { var a = [1]; for (var n = 2; n <= N; n++) a.push(0); return a; }
+
+  $("preset-saw").addEventListener("click", function () { setAmps(sawAmps()); setStatus("Sawtooth: every harmonic at 1/n."); });
+  $("preset-square").addEventListener("click", function () { setAmps(squareAmps()); setStatus("Square: odd harmonics only, at 1/n."); });
+  $("preset-odd").addEventListener("click", function () { setAmps(oddAmps()); setStatus("Odd harmonics only: a hollow, clarinet-like spectrum."); });
+  $("preset-sine").addEventListener("click", function () { setAmps(sineAmps()); setStatus("Pure sine: the fundamental alone, no harmonics."); });
+
+  // ---- audio: sum the partials into one PeriodicWave ----
+  function ensureContext() {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain();
+      master.gain.value = 0.0;
+      Shell.connectMaster(ctx, master);
+    }
+    return ctx;
+  }
+
+  function buildPeriodicWave() {
+    // Real/imag arrays for createPeriodicWave: index 0 is DC, index k is harmonic k.
+    var real = new Float32Array(N + 1);
+    var imag = new Float32Array(N + 1);
+    for (var k = 1; k <= N; k++) {
+      // Sine partials live in the imaginary part.
+      imag[k] = amps[k - 1];
+    }
+    return ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+  }
+
+  function rebuildVoice() {
+    if (!ctx) return;
+    stopVoice(true);
+    var osc = ctx.createOscillator();
+    osc.setPeriodicWave(buildPeriodicWave());
+    osc.frequency.value = FUND;
+    var g = ctx.createGain();
+    g.gain.value = 1.0;
+    osc.connect(g).connect(master);
+    osc.start();
+    periodicVoice = osc;
+    var now = ctx.currentTime;
+    master.gain.cancelScheduledValues(now);
+    master.gain.setValueAtTime(master.gain.value, now);
+    master.gain.linearRampToValueAtTime(0.2, now + 0.03);
+  }
+
+  function stopVoice(keepGain) {
+    if (periodicVoice) { try { periodicVoice.stop(); } catch (e) {} periodicVoice = null; }
+    if (master && !keepGain) {
+      var now = ctx.currentTime;
+      master.gain.cancelScheduledValues(now);
+      master.gain.setValueAtTime(master.gain.value, now);
+      master.gain.linearRampToValueAtTime(0.0, now + 0.03);
+    }
+  }
+
+  $("start").addEventListener("click", function () {
+    ensureContext();
+    ctx.resume().then(function () {
+      $("play").disabled = false;
+      $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then move the harmonic sliders.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true;
+      rebuildVoice();
+      $("play").innerHTML = "&#9632; Stop";
+      setStatus("Playing. Move a slider or pick a preset and hear the waveshape change.");
+    } else {
+      playing = false;
+      stopVoice(false);
+      $("play").innerHTML = "&#9658; Play";
+      setStatus("Stopped.");
+    }
+  });
+
+  // ---- visuals: waveshape + spectrum, computed from the same amplitudes ----
+  var waveCanvas = $("wave"), wctx = waveCanvas.getContext("2d");
+  var specCanvas = $("spectrum"), sctx = specCanvas.getContext("2d");
+
+  function drawWave() {
+    var w = waveCanvas.width, h = waveCanvas.height;
+    wctx.clearRect(0, 0, w, h);
+    // zero line
+    wctx.strokeStyle = "#D4D4D8"; wctx.lineWidth = 1;
+    wctx.beginPath(); wctx.moveTo(0, h / 2); wctx.lineTo(w, h / 2); wctx.stroke();
+    // sum the partials over one cycle
+    var pts = [];
+    var peak = 0;
+    for (var x = 0; x < w; x++) {
+      var phase = x / w;            // 0..1 over one cycle
+      var y = 0;
+      for (var k = 1; k <= N; k++) {
+        y += amps[k - 1] * Math.sin(2 * Math.PI * k * phase);
+      }
+      pts.push(y);
+      if (Math.abs(y) > peak) peak = Math.abs(y);
+    }
+    if (peak < 1e-6) peak = 1;
+    wctx.beginPath();
+    for (var i = 0; i < pts.length; i++) {
+      var yy = h / 2 - (pts[i] / peak) * (h / 2 - 12);
+      if (i === 0) wctx.moveTo(i, yy); else wctx.lineTo(i, yy);
+    }
+    wctx.strokeStyle = "#1D4ED8"; wctx.lineWidth = 2; wctx.stroke();
+  }
+
+  function drawSpectrum() {
+    var w = specCanvas.width, h = specCanvas.height;
+    sctx.clearRect(0, 0, w, h);
+    sctx.strokeStyle = "#D4D4D8"; sctx.lineWidth = 1;
+    sctx.beginPath(); sctx.moveTo(0, h - 18); sctx.lineTo(w, h - 18); sctx.stroke();
+    var slot = w / N;
+    var barW = slot * 0.5;
+    for (var k = 0; k < N; k++) {
+      var amp = amps[k];
+      var bh = amp * (h - 34);
+      var x = k * slot + (slot - barW) / 2;
+      sctx.fillStyle = "#1D4ED8";
+      sctx.fillRect(x, (h - 18) - bh, barW, bh);
+      sctx.fillStyle = "#52525B";
+      sctx.font = "11px -apple-system, Helvetica, Arial, sans-serif";
+      sctx.textAlign = "center";
+      sctx.fillText("h" + (k + 1), x + barW / 2, h - 4);
+    }
+  }
+
+  function redraw() { drawWave(); drawSpectrum(); }
+
+  // initial paint
+  redraw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-club-rhythms (slug: club-rhythms)
+  A club-rhythm explorer for the Friday club-cultures session. Pick a genre and
+  the grid loads that genre's signature rhythm at its own tempo and swing, so you
+  can hear the rhythmic DNA that separates the club styles by ear. The teaching
+  point is one distinction: house and techno put a KICK ON EVERY BEAT
+  (four-on-the-floor), while jungle and UK garage SKIP that steady pulse and run a
+  syncopated breakbeat instead. Switch between House, Techno, UK Garage (2-step),
+  and Jungle / drum & bass and listen for where the kick lands. You can also edit
+  any cell, change the tempo to hear a break slowed down, or push the swing to
+  hear the garage shuffle.
+
+  Four voices (kick, clap, closed hat, open hat) are all synthesized in the
+  browser, so nothing is loaded from disk. Self-contained, dependency-free Web
+  Audio (raw AudioContext). No build step: open by double-clicking this file.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe> (deploy
+  + UBC iframe domain allow-listing still pending). Browsers suspend the
+  AudioContext until a user gesture and a cross-origin iframe cannot rely on
+  autoplay, so audio NEVER starts on load: the Start button calls
+  audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Club rhythms (four-on-the-floor vs the breakbeat)</title>
+<style>
+  :root {
+    --accent: #9333EA;        /* culture-track accent */
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: #FFFFFF;
+    line-height: 1.5;
+  }
+  .demo { max-width: 780px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    margin: 0 0 16px;
+  }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.genre { font-size: 14px; }
+  button.genre.active { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 22px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .genretag { font-weight: 600; color: var(--accent); }
+
+  /* sequencer grid */
+  .grid { display: grid; gap: 8px; }
+  .track { display: grid; grid-template-columns: 78px 1fr; gap: 8px; align-items: center; }
+  .track .name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .steps { display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px; }
+  .cell {
+    aspect-ratio: 1 / 1; min-height: 24px; padding: 0;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: var(--surface); cursor: pointer; font-size: 0;
+  }
+  /* every 4th cell starts a beat: a slightly stronger left edge */
+  .cell.beat { border-left: 2px solid #A1A1AA; }
+  .cell.on { background: var(--accent); border-color: var(--accent); }
+  .cell.accent { background: var(--warm); border-color: var(--warm); box-shadow: inset 0 0 0 2px #FFFFFF; }
+  .cell.playhead { outline: 3px solid var(--good); outline-offset: 1px; }
+  .beatnums { display: grid; grid-template-columns: 78px 1fr; gap: 8px; margin-bottom: 2px; }
+  .beatnums .nums { display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px; }
+  .beatnums .nums span { font-size: 11px; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+  .legendline { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+  .legendline b.k { color: var(--accent); }
+  .legendline b.a { color: var(--warm); }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<div class="demo">
+  <h1>Club rhythms: four-on-the-floor against the breakbeat</h1>
+  <p class="instructions">
+    Pick a genre and the grid loads its signature rhythm at its own tempo and feel. Listen for one thing:
+    <strong>house</strong> and <strong>techno</strong> put a <strong>kick on every beat</strong> (four-on-the-floor),
+    while <strong>jungle</strong> and <strong>UK garage</strong> skip that steady pulse and run a syncopated
+    <strong>breakbeat</strong> instead. Switch genres and follow where the kick lands. You can edit any cell, change
+    the tempo, or push the swing to hear the garage shuffle. Press Start to enable sound, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: choose a club genre</legend>
+    <div class="row">
+      <button class="genre" type="button" data-genre="house">House</button>
+      <button class="genre" type="button" data-genre="techno">Techno</button>
+      <button class="genre" type="button" data-genre="garage">UK Garage (2-step)</button>
+      <button class="genre" type="button" data-genre="jungle">Jungle / drum &amp; bass</button>
+      <button id="clear" class="genre" type="button">Clear</button>
+    </div>
+    <p class="status" id="genre-desc"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: the pattern (click a cell to place a hit, click again for an accent)</legend>
+    <div class="beatnums">
+      <span></span>
+      <div class="nums" id="beatnums"></div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <p class="legendline">
+      <b class="k">&#9632;</b> hit &nbsp; <b class="a">&#9632;</b> accent (louder) &nbsp; outlined column = the step now playing.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 4: shape the feel</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="tempo">Tempo <span class="val" id="tempo-v">124 BPM</span></label>
+        <input id="tempo" type="range" min="110" max="180" step="1" value="124">
+      </div>
+      <div class="ctl">
+        <label for="swing">Swing <span class="val" id="swing-v">10%</span></label>
+        <input id="swing" type="range" min="0" max="62" step="1" value="10">
+      </div>
+    </div>
+    <p class="legendline">
+      Tip: load <strong>Jungle</strong> and drag the tempo down to about 120 to hear the breakbeat the way
+      early producers first heard it before they sped it up. Load <strong>UK Garage</strong> and push the swing
+      to hear the skip.
+    </p>
+  </fieldset>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, playing = false;
+  var scheduler = null;
+  var LOOKAHEAD = 0.1;   // schedule hits this far ahead (s)
+  var TICK = 25;         // scheduler wakeup (ms)
+  var STEPS = 16;
+
+  var TRACKS = [
+    { id: "hatO",  name: "Open hat" },
+    { id: "hatC",  name: "Closed hat" },
+    { id: "clap",  name: "Clap / snare" },
+    { id: "kick",  name: "Kick" }
+  ];
+
+  // pattern[trackId][step] = 0 (off) | 1 (on) | 2 (accent)
+  var pattern = {};
+  TRACKS.forEach(function (t) { pattern[t.id] = new Array(STEPS).fill(0); });
+
+  var params = { tempo: 124, swing: 10 };
+
+  var currentStep = 0;
+  var nextStepTime = 0;
+  var lastDrawn = -1;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---------- synth voices (all generated, nothing loaded) ----------
+  var noiseBuffer = null;
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 1.0);
+    var buf = ctx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function gainFor(state) {
+    // state 1 = normal, state 2 = accent (+5 dB)
+    var base = 0.7;
+    if (state === 2) return base * Math.pow(10, 5 / 20);
+    return base;
+  }
+
+  function playKick(when, state) {
+    var g = ctx.createGain();
+    var amp = 0.95 * (gainFor(state) / 0.7);
+    g.gain.setValueAtTime(amp, when);
+    g.gain.exponentialRampToValueAtTime(0.0008, when + 0.34);
+    var o = ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.setValueAtTime(155, when);
+    o.frequency.exponentialRampToValueAtTime(46, when + 0.12);
+    o.connect(g).connect(master);
+    o.start(when); o.stop(when + 0.36);
+  }
+
+  function playClap(when, state) {
+    // a clap: a short, noisy, bandpass burst with a couple of fast repeats
+    var amp = gainFor(state);
+    var bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+    bp.frequency.value = 1500; bp.Q.value = 0.8;
+    var offsets = [0, 0.009, 0.018];
+    for (var i = 0; i < offsets.length; i++) {
+      var n = ctx.createBufferSource(); n.buffer = noiseBuffer;
+      var g = ctx.createGain();
+      var t0 = when + offsets[i];
+      var lvl = amp * (i === offsets.length - 1 ? 0.85 : 0.45);
+      g.gain.setValueAtTime(lvl, t0);
+      g.gain.exponentialRampToValueAtTime(0.0008, t0 + (i === offsets.length - 1 ? 0.18 : 0.03));
+      n.connect(bp).connect(g).connect(master);
+      n.start(t0); n.stop(t0 + 0.2);
+    }
+  }
+
+  function playHatC(when, state) {
+    var amp = gainFor(state);
+    var n = ctx.createBufferSource(); n.buffer = noiseBuffer;
+    var hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 7500;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(amp * 0.4, when);
+    g.gain.exponentialRampToValueAtTime(0.0006, when + 0.045);
+    n.connect(hp).connect(g).connect(master);
+    n.start(when); n.stop(when + 0.06);
+  }
+
+  function playHatO(when, state) {
+    var amp = gainFor(state);
+    var n = ctx.createBufferSource(); n.buffer = noiseBuffer;
+    var hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 6500;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(amp * 0.34, when);
+    g.gain.exponentialRampToValueAtTime(0.0006, when + 0.3);
+    n.connect(hp).connect(g).connect(master);
+    n.start(when); n.stop(when + 0.32);
+  }
+
+  var VOICE = { kick: playKick, clap: playClap, hatC: playHatC, hatO: playHatO };
+
+  // ---------- scheduling ----------
+  function stepDuration() {
+    // one sixteenth note in seconds
+    return (60 / params.tempo) / 4;
+  }
+
+  function swingOffset(step) {
+    // delay the off-beat sixteenths (odd steps) by up to ~2/3 of a step
+    if (step % 2 === 1) {
+      return (params.swing / 100) * stepDuration() * 0.9;
+    }
+    return 0;
+  }
+
+  function scheduleStep(step, when) {
+    TRACKS.forEach(function (t) {
+      var state = pattern[t.id][step];
+      if (state > 0) {
+        var at = when + swingOffset(step);
+        if (at < ctx.currentTime) at = ctx.currentTime;
+        VOICE[t.id](at, state);
+      }
+    });
+  }
+
+  function scheduleLoop() {
+    while (nextStepTime < ctx.currentTime + LOOKAHEAD) {
+      scheduleStep(currentStep, nextStepTime);
+      drawQueue.push({ step: currentStep, time: nextStepTime });
+      nextStepTime += stepDuration();
+      currentStep = (currentStep + 1) % STEPS;
+    }
+  }
+
+  // ---------- playhead drawing ----------
+  var drawQueue = [];
+  function drawLoop() {
+    var now = ctx ? ctx.currentTime : 0;
+    var step = lastDrawn;
+    while (drawQueue.length && drawQueue[0].time < now) {
+      step = drawQueue.shift().step;
+    }
+    if (step !== lastDrawn) {
+      paintPlayhead(step);
+      lastDrawn = step;
+    }
+    if (playing) requestAnimationFrame(drawLoop);
+  }
+
+  function paintPlayhead(step) {
+    for (var s = 0; s < STEPS; s++) {
+      var on = (s === step);
+      TRACKS.forEach(function (t) {
+        var el = cellEl(t.id, s);
+        if (on) el.classList.add("playhead"); else el.classList.remove("playhead");
+      });
+    }
+  }
+
+  function clearPlayhead() {
+    TRACKS.forEach(function (t) {
+      for (var s = 0; s < STEPS; s++) cellEl(t.id, s).classList.remove("playhead");
+    });
+  }
+
+  // ---------- grid build + interaction ----------
+  function cellId(track, step) { return "c-" + track + "-" + step; }
+  function cellEl(track, step) { return $(cellId(track, step)); }
+
+  function renderCellState(track, step) {
+    var el = cellEl(track, step);
+    var st = pattern[track][step];
+    el.classList.toggle("on", st === 1);
+    el.classList.toggle("accent", st === 2);
+    el.setAttribute("aria-pressed", st > 0 ? "true" : "false");
+  }
+
+  function buildGrid() {
+    var nums = $("beatnums");
+    for (var s = 0; s < STEPS; s++) {
+      var sp = document.createElement("span");
+      sp.textContent = (s % 4 === 0) ? String(s / 4 + 1) : ".";
+      nums.appendChild(sp);
+    }
+    var grid = $("grid");
+    TRACKS.forEach(function (t) {
+      var track = document.createElement("div");
+      track.className = "track";
+      var name = document.createElement("div");
+      name.className = "name"; name.textContent = t.name;
+      track.appendChild(name);
+      var steps = document.createElement("div");
+      steps.className = "steps";
+      for (var s = 0; s < STEPS; s++) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "cell" + (s % 4 === 0 ? " beat" : "");
+        b.id = cellId(t.id, s);
+        b.setAttribute("aria-label", t.name + " step " + (s + 1));
+        b.setAttribute("aria-pressed", "false");
+        (function (trackId, step) {
+          b.addEventListener("click", function () {
+            // cycle off -> on -> accent -> off
+            pattern[trackId][step] = (pattern[trackId][step] + 1) % 3;
+            renderCellState(trackId, step);
+          });
+        })(t.id, s);
+        steps.appendChild(b);
+      }
+      track.appendChild(steps);
+      grid.appendChild(track);
+    });
+  }
+
+  function applyPattern(p) {
+    TRACKS.forEach(function (t) {
+      for (var s = 0; s < STEPS; s++) {
+        pattern[t.id][s] = (p[t.id] && p[t.id][s]) || 0;
+        renderCellState(t.id, s);
+      }
+    });
+  }
+
+  // ---------- genres ----------
+  // legend: 0 off, 1 hit, 2 accent. Sixteen steps = one 4/4 bar; beats on 1,5,9,13.
+  var GENRES = {
+    house: {
+      label: "House",
+      tempo: 124, swing: 10,
+      desc: "House (Chicago, about 124 BPM): a kick on every beat, an offbeat open hat, and a clap on 2 and 4. The four-on-the-floor pulse is the floor that never stops.",
+      pattern: {
+        kick: [2,0,0,0, 1,0,0,0, 2,0,0,0, 1,0,0,0],
+        clap: [0,0,0,0, 2,0,0,0, 0,0,0,0, 2,0,0,0],
+        hatC: [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+        hatO: [0,0,2,0, 0,0,2,0, 0,0,2,0, 0,0,2,0]
+      }
+    },
+    techno: {
+      label: "Techno",
+      tempo: 132, swing: 0,
+      desc: "Techno (Detroit, about 130 BPM): the same kick on every beat, stripped down and hypnotic. Fewer layers, more drive. The machine is the point.",
+      pattern: {
+        kick: [2,0,0,0, 2,0,0,0, 2,0,0,0, 2,0,0,0],
+        clap: [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,1,0],
+        hatC: [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0],
+        hatO: [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0]
+      }
+    },
+    garage: {
+      label: "UK Garage (2-step)",
+      tempo: 134, swing: 58,
+      desc: "UK garage, 2-step (London, about 132 BPM with heavy swing): the kick skips beats rather than marching, the hats shuffle, and the snare answers on 2 and 4. The groove lurches instead of pounding.",
+      pattern: {
+        kick: [2,0,0,0, 0,0,0,0, 0,0,1,0, 0,0,0,0],
+        clap: [0,0,0,0, 2,0,0,0, 0,0,0,0, 2,0,0,0],
+        hatC: [1,0,1,1, 0,1,1,0, 1,0,1,1, 0,1,1,0],
+        hatO: [0,0,0,0, 0,0,0,0, 0,0,2,0, 0,0,0,0]
+      }
+    },
+    jungle: {
+      label: "Jungle / drum & bass",
+      tempo: 168, swing: 0,
+      desc: "Jungle and drum & bass (London, about 165 BPM): no steady four-on-the-floor at all. The kick and snare cut up a fast breakbeat, the descendant of the chopped Amen break, over a sub-bass the grid does not show.",
+      pattern: {
+        kick: [2,0,0,0, 0,0,0,1, 0,0,2,0, 0,0,0,0],
+        clap: [0,0,0,0, 2,0,0,0, 0,0,0,2, 0,2,0,0],
+        hatC: [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+        hatO: [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,2,0]
+      }
+    }
+  };
+
+  function setSlider(id, key, value, fmt) {
+    $(id).value = value;
+    params[key] = value;
+    $(id + "-v").textContent = fmt(value);
+  }
+
+  function markActive(genre) {
+    var btns = document.querySelectorAll("button.genre");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle("active", btns[i].getAttribute("data-genre") === genre);
+    }
+  }
+
+  function loadGenre(key) {
+    var g = GENRES[key];
+    if (!g) return;
+    applyPattern(g.pattern);
+    setSlider("tempo", "tempo", g.tempo, function (v) { return v + " BPM"; });
+    setSlider("swing", "swing", g.swing, function (v) { return v + "%"; });
+    markActive(key);
+    $("genre-desc").innerHTML = "<span class='genretag'>" + g.label + ".</span> " + g.desc;
+  }
+
+  // ---------- control binding ----------
+  function bindRange(id, key, fmt) {
+    var el = $(id), out = $(id + "-v");
+    el.addEventListener("input", function () {
+      params[key] = +el.value;
+      out.textContent = fmt(+el.value);
+    });
+  }
+  bindRange("tempo", "tempo", function (v) { return v + " BPM"; });
+  bindRange("swing", "swing", function (v) { return v + "%"; });
+
+  var genreButtons = document.querySelectorAll("button.genre[data-genre]");
+  for (var i = 0; i < genreButtons.length; i++) {
+    (function (btn) {
+      btn.addEventListener("click", function () { loadGenre(btn.getAttribute("data-genre")); });
+    })(genreButtons[i]);
+  }
+
+  $("clear").addEventListener("click", function () {
+    TRACKS.forEach(function (t) { pattern[t.id].fill(0); for (var s = 0; s < STEPS; s++) renderCellState(t.id, s); });
+    markActive(null);
+    $("genre-desc").textContent = "Cleared. Click the grid to build your own rhythm, or pick a genre to compare.";
+  });
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.9; Shell.connectMaster(ctx, master);
+      noiseBuffer = buildNoise();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false;
+      $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then switch genres and follow the kick.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true;
+      currentStep = 0; lastDrawn = -1; drawQueue.length = 0;
+      nextStepTime = ctx.currentTime + 0.06;
+      scheduler = setInterval(scheduleLoop, TICK);
+      requestAnimationFrame(drawLoop);
+      $("play").innerHTML = "&#9632; Stop";
+      setStatus("Playing. Switch between House, Techno, UK Garage, and Jungle and listen for where the kick lands.");
+    } else {
+      playing = false;
+      clearInterval(scheduler); scheduler = null;
+      clearPlayhead();
+      $("play").innerHTML = "&#9658; Play";
+      setStatus("Stopped.");
+    }
+  });
+
+  // ---------- init ----------
+  buildGrid();
+  loadGenre("house");
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-gestural (slug: gestural)
+  An expressive XY performance pad for the Gestural & live control session. It
+  stands in for a hardware MIDI controller: drag on the pad and your hand drives
+  two parameters of a live synth voice at once, the filter cutoff on X and the
+  resonance on Y, the way a controller's knobs or an XY touch surface would.
+
+  The teaching payload is the contrast the session is about: performed movement
+  versus sequenced movement. Record a gesture by dragging, then replay it two
+  ways. "Replay performed" reproduces your continuous hand motion exactly.
+  "Replay stepped" quantizes the SAME path to a grid, the way drawn or step
+  automation snaps to a sequencer's resolution, and plays it as held steps. The
+  two sound different, and that difference is why live control is a compositional
+  choice and not just a convenience: a performed parameter breathes, a stepped one
+  locks to the grid.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe> (deploy
+  + UBC iframe domain allow-listing still pending). Browsers suspend the
+  AudioContext until a user gesture and a cross-origin iframe cannot rely on
+  autoplay, so audio NEVER starts on load: the Start button calls
+  audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Gestural & live control (XY performance pad)</title>
+<style>
+  :root {
+    --accent: #1D4ED8;        /* technical-track accent */
+    --cult: #9333EA;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.rec.armed { background: var(--warm); color: #FFFFFF; border-color: var(--warm); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 22px; margin-top: 6px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .stage { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; touch-action: none; cursor: crosshair; }
+  .reading { font-size: 13px; color: var(--muted); }
+  .reading b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  .hp { color: var(--warm); font-weight: 600; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<div class="demo">
+  <h1>Gestural & live control: perform a parameter, then sequence it</h1>
+  <p class="instructions">
+    Drag on the pad to play a live synth voice with your hand: <strong>left-right is filter cutoff</strong>,
+    <strong>up-down is resonance</strong>, the kind of two-at-once move a controller gives you. Then
+    <strong>record</strong> a gesture and replay it two ways: <strong>performed</strong> (your exact motion) and
+    <strong>stepped</strong> (the same path quantized to a grid, the way drawn automation snaps). Listen for the
+    difference performance makes. <span class="hp">Headphones or speakers; press Start, then Play tone.</span>
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play tone</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: perform and record a gesture</legend>
+    <div class="stage">
+      <div>
+        <canvas id="pad" width="300" height="240" aria-label="Performance pad: drag to control filter cutoff on the horizontal axis and resonance on the vertical axis"></canvas>
+        <p class="reading" id="reading">cutoff and resonance follow your hand</p>
+      </div>
+      <div style="flex:1; min-width:240px;">
+        <div class="row">
+          <button id="rec" class="rec" type="button" disabled>&#9679; Record gesture</button>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button id="play-perf" type="button" disabled>&#9658; Replay performed</button>
+          <button id="play-step" type="button" disabled>&#9658; Replay stepped</button>
+        </div>
+        <div class="controls">
+          <div class="ctl">
+            <label for="steps">Sequencer grid <span class="val" id="steps-v">8 steps</span></label>
+            <input id="steps" type="range" min="4" max="32" step="1" value="8">
+          </div>
+          <div class="ctl">
+            <label for="pitch">Voice pitch <span class="val" id="pitch-v">A2 (110 Hz)</span></label>
+            <input id="pitch" type="range" min="55" max="220" step="1" value="110">
+          </div>
+        </div>
+        <p class="note" id="rec-note">No gesture recorded yet. Record one, then compare the two replays.</p>
+      </div>
+    </div>
+  </fieldset>
+
+  <p class="note">
+    The <strong>performed</strong> replay rides your continuous motion, so the filter glides and pauses the way your hand
+    did. The <strong>stepped</strong> replay holds each value to the nearest grid position, the way step automation or a
+    quantized lane would, so it jumps instead of glides. A coarse grid (fewer steps) makes the contrast obvious; a fine
+    grid approaches the performed line. That is the choice live control gives a composer: let the gesture breathe, or lock
+    it to the grid, the same material either way.
+  </p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null;
+  var osc = null, sub = null, filter = null, amp = null;
+  var toneOn = false, recording = false;
+  var recPath = [], recStart = 0, replayReq = null;
+  var pad = { x: 0.5, y: 0.4 };               // normalized cursor (0..1), y from BOTTOM
+  var params = { steps: 8, pitch: 110 };
+
+  var CUT_LO = 150, CUT_HI = 8000;            // Hz, exponential X map
+  var Q_LO = 0.7, Q_HI = 20;                  // resonance, linear Y map
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+  function cutoffFor(x) { return CUT_LO * Math.pow(CUT_HI / CUT_LO, clamp01(x)); }
+  function qFor(y) { return Q_LO + (Q_HI - Q_LO) * clamp01(y); }
+
+  // ---------- apply the current pad position to the live voice ----------
+  function applyPad(smooth) {
+    if (!ctx || !filter) return;
+    var t = ctx.currentTime;
+    var co = cutoffFor(pad.x), q = qFor(pad.y);
+    if (smooth) {
+      filter.frequency.linearRampToValueAtTime(co, t + 0.03);
+      filter.Q.linearRampToValueAtTime(q, t + 0.03);
+    } else {
+      filter.frequency.setValueAtTime(co, t);
+      filter.Q.setValueAtTime(q, t);
+    }
+    $("reading").innerHTML = "cutoff <b>" + Math.round(co) + " Hz</b>, resonance <b>Q " + q.toFixed(1) + "</b>";
+  }
+
+  // ---------- audio graph: saw + sub -> lowpass -> amp -> master ----------
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0; Shell.connectMaster(ctx, master);
+    osc = ctx.createOscillator(); osc.type = "sawtooth"; osc.frequency.value = params.pitch;
+    sub = ctx.createOscillator(); sub.type = "sine"; sub.frequency.value = params.pitch / 2;
+    var subG = ctx.createGain(); subG.gain.value = 0.4;
+    filter = ctx.createBiquadFilter(); filter.type = "lowpass";
+    filter.frequency.value = cutoffFor(pad.x); filter.Q.value = qFor(pad.y);
+    amp = ctx.createGain(); amp.gain.value = 0.22;
+    osc.connect(filter); sub.connect(subG).connect(filter);
+    filter.connect(amp).connect(master);
+    osc.start(); sub.start();
+  }
+
+  function setTone(on) {
+    if (!ctx) return;
+    toneOn = on;
+    var t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.9 : 0.0, t + 0.05);
+    $("play").innerHTML = on ? "&#9632; Stop tone" : "&#9658; Play tone";
+  }
+
+  // ---------- pad drawing ----------
+  function drawPad(extra) {
+    var c = $("pad"), g = c.getContext("2d");
+    var W = c.width, H = c.height;
+    g.clearRect(0, 0, W, H);
+
+    // grid (the sequencer resolution on X for reference)
+    g.strokeStyle = "#E4E4E7"; g.lineWidth = 1;
+    for (var s = 1; s < params.steps; s++) {
+      var gx = (s / params.steps) * W;
+      g.beginPath(); g.moveTo(gx, 0); g.lineTo(gx, H); g.stroke();
+    }
+    g.strokeStyle = "#EDEDF0";
+    [0.25, 0.5, 0.75].forEach(function (f) {
+      g.beginPath(); g.moveTo(0, f * H); g.lineTo(W, f * H); g.stroke();
+    });
+
+    // axis labels
+    g.fillStyle = "#52525B"; g.font = "11px sans-serif";
+    g.textAlign = "left"; g.fillText("cutoff →", 6, H - 8);
+    g.save(); g.translate(12, H - 30); g.rotate(-Math.PI / 2);
+    g.fillText("resonance →", 0, 0); g.restore();
+
+    // recorded path
+    if (recPath.length > 1) {
+      g.strokeStyle = "#9333EA"; g.lineWidth = 1.6; g.beginPath();
+      recPath.forEach(function (p, i) {
+        var x = p.x * W, y = (1 - p.y) * H;
+        if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      });
+      g.stroke();
+    }
+
+    // replay marker
+    if (extra && extra.marker) {
+      var mx = extra.marker.x * W, my = (1 - extra.marker.y) * H;
+      g.fillStyle = extra.stepped ? "#C2410C" : "#15803D";
+      g.beginPath(); g.arc(mx, my, 7, 0, 2 * Math.PI); g.fill();
+    }
+
+    // live cursor
+    var cx = pad.x * W, cy = (1 - pad.y) * H;
+    g.fillStyle = "#1D4ED8";
+    g.beginPath(); g.arc(cx, cy, 8, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#FFFFFF"; g.lineWidth = 2; g.stroke();
+  }
+
+  // ---------- pointer handling on the pad ----------
+  function padPos(ev) {
+    var c = $("pad"), r = c.getBoundingClientRect();
+    var x = clamp01((ev.clientX - r.left) / c.width);
+    var y = clamp01(1 - (ev.clientY - r.top) / c.height);   // y up = bottom origin
+    return { x: x, y: y };
+  }
+  var dragging = false;
+  function moveTo(ev) {
+    var p = padPos(ev);
+    pad.x = p.x; pad.y = p.y;
+    applyPad(true);
+    if (recording) recPath.push({ t: ctx.currentTime - recStart, x: p.x, y: p.y });
+    drawPad();
+  }
+  $("pad").addEventListener("pointerdown", function (ev) {
+    if (!ctx) return;
+    dragging = true; if (!toneOn) setTone(true);
+    moveTo(ev); ev.preventDefault();
+  });
+  window.addEventListener("pointermove", function (ev) { if (dragging) moveTo(ev); });
+  window.addEventListener("pointerup", function () { dragging = false; });
+
+  // ---------- record ----------
+  $("rec").addEventListener("click", function () {
+    if (!ctx) return;
+    recording = !recording;
+    if (recording) {
+      recPath = []; recStart = ctx.currentTime;
+      this.classList.add("armed"); this.innerHTML = "&#9632; Stop recording";
+      if (!toneOn) setTone(true);
+      $("rec-note").textContent = "Recording. Drag on the pad to perform, then stop.";
+      setStatus("Recording your gesture. Drag on the pad.");
+    } else {
+      this.classList.remove("armed"); this.innerHTML = "&#9679; Record gesture";
+      var ok = recPath.length > 2;
+      $("play-perf").disabled = !ok; $("play-step").disabled = !ok;
+      $("rec-note").textContent = ok
+        ? "Recorded " + recPath.length + " points over " + recPath[recPath.length - 1].t.toFixed(1) +
+          " s. Compare the two replays."
+        : "Too short, try again with a longer drag.";
+      setStatus(ok ? "Gesture recorded. Replay it performed, then stepped." : "Gesture too short.");
+      drawPad();
+    }
+  });
+
+  // ---------- replay (performed = exact, stepped = grid-quantized) ----------
+  function stopReplay() { if (replayReq) { cancelAnimationFrame(replayReq); replayReq = null; } }
+
+  function replay(stepped) {
+    if (!recPath.length || !ctx) return;
+    stopReplay();
+    if (!toneOn) setTone(true);
+    var dur = recPath[recPath.length - 1].t || 1;
+    var start = ctx.currentTime;
+    var nSteps = params.steps;
+    var lastStep = -1;
+
+    function valueAt(time) {
+      // linear search is fine: a few hundred points.
+      var i = 0;
+      while (i < recPath.length - 1 && recPath[i + 1].t <= time) i++;
+      return recPath[i];
+    }
+
+    function frame() {
+      var now = ctx.currentTime - start;
+      if (now >= dur) {
+        stopReplay();
+        setStatus("Replay done.");
+        drawPad();
+        return;
+      }
+      var p;
+      if (stepped) {
+        var stepIdx = Math.floor((now / dur) * nSteps);
+        if (stepIdx !== lastStep) {
+          lastStep = stepIdx;
+          var stepTime = (stepIdx / nSteps) * dur;       // value sampled at the step boundary
+          p = valueAt(stepTime);
+          pad.x = p.x; pad.y = p.y; applyPad(false);     // snap, no glide
+        }
+        p = { x: pad.x, y: pad.y };
+      } else {
+        p = valueAt(now);
+        pad.x = p.x; pad.y = p.y; applyPad(true);         // smooth, follows the hand
+      }
+      drawPad({ marker: p, stepped: stepped });
+      replayReq = requestAnimationFrame(frame);
+    }
+    setStatus(stepped ? "Replaying stepped (quantized to the grid)." : "Replaying performed (your exact motion).");
+    replayReq = requestAnimationFrame(frame);
+  }
+  $("play-perf").addEventListener("click", function () { replay(false); });
+  $("play-step").addEventListener("click", function () { replay(true); });
+
+  // ---------- sliders ----------
+  $("steps").addEventListener("input", function () {
+    params.steps = +this.value; $("steps-v").textContent = this.value + " steps"; drawPad();
+  });
+  $("pitch").addEventListener("input", function () {
+    params.pitch = +this.value;
+    var names = noteName(params.pitch);
+    $("pitch-v").textContent = names + " (" + this.value + " Hz)";
+    if (osc) { osc.frequency.setValueAtTime(params.pitch, ctx.currentTime); sub.frequency.setValueAtTime(params.pitch / 2, ctx.currentTime); }
+  });
+  function noteName(f) {
+    var n = Math.round(12 * Math.log2(f / 440) + 69);
+    var names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    return names[(n % 12 + 12) % 12] + (Math.floor(n / 12) - 1);
+  }
+
+  // ---------- transport ----------
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("rec").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play tone, then drag on the pad.");
+      drawPad();
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setTone(!toneOn);
+    setStatus(toneOn ? "Tone on. Drag on the pad to shape it." : "Tone stopped.");
+  });
+
+  // ---------- init ----------
+  $("pitch-v").textContent = noteName(params.pitch) + " (" + params.pitch + " Hz)";
+  drawPad();
+})();
+</script>
+</body>
+</html>
