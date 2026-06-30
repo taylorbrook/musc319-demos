@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-subtractive (slug: subtractive)
+  The canonical subtractive signal path for the Wednesday synthesis session
+  (wk06-wed-subtractive): oscillator -> filter -> amplifier (VCA), with a filter
+  envelope and an amp ADSR envelope. It makes the session's working principle
+  audible: start with a harmonically rich waveform and REMOVE from it.
+
+  The player picks the oscillator waveshape (saw / square / triangle), sets the
+  lowpass filter cutoff and resonance, and shapes both the filter sweep and the
+  amplitude with attack / decay / sustain / release on note-on / note-off. A live
+  spectrum (FFT) shows the harmonics being subtracted as the filter closes.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe>. Audio
+  NEVER starts on load: the Start button calls audioContext.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Subtractive synthesis (oscillator &#8594; filter &#8594; amp)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .wave-btn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#scope { height: 140px; }
+  .chain { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+  .chain b { color: var(--accent); }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Subtractive synthesis: start rich, then remove</h1>
+  <p class="instructions">
+    The classic synth signal path: a harmonically rich <strong>oscillator</strong> &#8594; a
+    <strong>filter</strong> that removes or emphasizes part of it &#8594; an <strong>amplifier</strong> shaped by an
+    envelope. Pick a waveshape, set the cutoff and resonance, and play notes to hear the
+    <strong>filter envelope</strong> sweep and the <strong>amp ADSR</strong> shape the level.
+    Press Start, then play a note.
+  </p>
+  <p class="chain"><b>oscillator</b> &#8594; <b>filter</b> (with its envelope) &#8594; <b>VCA</b> (amp ADSR)</p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="note" class="play" type="button" disabled>&#9658; Play note (hold)</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the oscillator</legend>
+    <div class="row" style="margin-bottom:12px;">
+      <button id="w-sawtooth" class="wave-btn" type="button">Sawtooth</button>
+      <button id="w-square" class="wave-btn" type="button">Square</button>
+      <button id="w-triangle" class="wave-btn" type="button">Triangle</button>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label for="pitch">Pitch <span class="val" id="pitch-v">110 Hz</span></label>
+        <input id="pitch" type="range" min="55" max="440" step="1" value="110">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: the filter</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="cutoff">Base cutoff <span class="val" id="cutoff-v">600 Hz</span></label>
+        <input id="cutoff" type="range" min="80" max="10000" step="1" value="600">
+      </div>
+      <div class="ctl">
+        <label for="res">Resonance (Q) <span class="val" id="res-v">6.0</span></label>
+        <input id="res" type="range" min="0.5" max="24" step="0.1" value="6">
+      </div>
+      <div class="ctl">
+        <label for="fenv">Filter envelope amount <span class="val" id="fenv-v">3000 Hz</span></label>
+        <input id="fenv" type="range" min="0" max="8000" step="10" value="3000">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 4: the amp envelope (ADSR)</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="attack">Attack <span class="val" id="attack-v">0.01 s</span></label>
+        <input id="attack" type="range" min="0.001" max="1.5" step="0.001" value="0.01">
+      </div>
+      <div class="ctl">
+        <label for="decay">Decay <span class="val" id="decay-v">0.20 s</span></label>
+        <input id="decay" type="range" min="0.01" max="2" step="0.01" value="0.2">
+      </div>
+      <div class="ctl">
+        <label for="sustain">Sustain <span class="val" id="sustain-v">0.60</span></label>
+        <input id="sustain" type="range" min="0" max="1" step="0.01" value="0.6">
+      </div>
+      <div class="ctl">
+        <label for="release">Release <span class="val" id="release-v">0.40 s</span></label>
+        <input id="release" type="range" min="0.01" max="3" step="0.01" value="0.4">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT)</legend>
+    <canvas id="scope" width="780" height="140" aria-label="Live frequency spectrum of the subtractive voice"></canvas>
+    <p class="note">
+      Watch the high partials disappear as the filter closes: that removal is what gives subtractive
+      synthesis its name. The filter envelope opens the cutoff on note-on; the amp ADSR shapes the level.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, filter = null, vca = null, scopeBus = null, voice = null;
+  var noteHeld = false;
+  var params = {
+    wave: "sawtooth", pitch: 110, cutoff: 600, res: 6, fenv: 3000,
+    attack: 0.01, decay: 0.2, sustain: 0.6, release: 0.4
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.9;
+    filter = ctx.createBiquadFilter(); filter.type = "lowpass";
+    filter.frequency.value = params.cutoff; filter.Q.value = params.res;
+    vca = ctx.createGain(); vca.gain.value = 0.0;          // amp ADSR target
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 1.0;
+
+    filter.connect(vca).connect(scopeBus).connect(master);
+    Shell.connectMaster(ctx, master);
+
+    // scope on the post-filter / post-amp signal (D-07)
+    Shell.createScope(ctx, scopeBus, $("scope"), "fft");
+  }
+
+  function noteOn() {
+    if (!ctx || noteHeld) return;
+    noteHeld = true;
+    var t = ctx.currentTime;
+
+    voice = ctx.createOscillator();
+    voice.type = params.wave;
+    voice.frequency.setValueAtTime(params.pitch, t);
+    voice.connect(filter);
+    voice.start(t);
+
+    // filter envelope: open from base cutoff to cutoff+amount, then decay to base
+    var peak = Math.min(20000, params.cutoff + params.fenv);
+    filter.frequency.cancelScheduledValues(t);
+    filter.frequency.setValueAtTime(params.cutoff, t);
+    filter.frequency.linearRampToValueAtTime(peak, t + params.attack);
+    filter.frequency.setTargetAtTime(params.cutoff, t + params.attack, params.decay / 2 + 0.01);
+
+    // amp ADSR
+    vca.gain.cancelScheduledValues(t);
+    vca.gain.setValueAtTime(0.0001, t);
+    vca.gain.linearRampToValueAtTime(0.8, t + params.attack);
+    vca.gain.linearRampToValueAtTime(0.8 * params.sustain + 0.0001, t + params.attack + params.decay);
+
+    $("note").innerHTML = "&#9632; Release note";
+    setStatus("Note held: attack then decay to sustain. Release to hear the release tail.");
+  }
+
+  function noteOff() {
+    if (!ctx || !noteHeld) return;
+    noteHeld = false;
+    var t = ctx.currentTime;
+    vca.gain.cancelScheduledValues(t);
+    vca.gain.setValueAtTime(vca.gain.value, t);
+    vca.gain.linearRampToValueAtTime(0.0001, t + params.release);
+    if (voice) { try { voice.stop(t + params.release + 0.05); } catch (e) {} }
+    $("note").innerHTML = "&#9658; Play note (hold)";
+    setStatus("Released. The release time sets how long the tail holds.");
+  }
+
+  // ---- waveshape buttons ----
+  var waveBtns = { sawtooth: "w-sawtooth", square: "w-square", triangle: "w-triangle" };
+  function selectWave(w) {
+    params.wave = w;
+    Object.keys(waveBtns).forEach(function (k) { $(waveBtns[k]).classList.toggle("active", k === w); });
+    if (voice) voice.type = w;
+  }
+  Object.keys(waveBtns).forEach(function (k) {
+    $(waveBtns[k]).addEventListener("click", function () { selectWave(k); });
+  });
+
+  // ---- sliders ----
+  function bind(id, key, fmt) {
+    $(id).addEventListener("input", function () {
+      params[key] = +this.value; $(id + "-v").textContent = fmt(params[key]);
+      if (key === "cutoff" && filter && !noteHeld) filter.frequency.setTargetAtTime(params.cutoff, ctx.currentTime, 0.02);
+      if (key === "res" && filter) filter.Q.setTargetAtTime(params.res, ctx.currentTime, 0.02);
+      if (key === "pitch" && voice) voice.frequency.setValueAtTime(params.pitch, ctx.currentTime);
+    });
+  }
+  bind("pitch", "pitch", function (v) { return Math.round(v) + " Hz"; });
+  bind("cutoff", "cutoff", function (v) { return Math.round(v) + " Hz"; });
+  bind("res", "res", function (v) { return v.toFixed(1); });
+  bind("fenv", "fenv", function (v) { return Math.round(v) + " Hz"; });
+  bind("attack", "attack", function (v) { return v.toFixed(3) + " s"; });
+  bind("decay", "decay", function (v) { return v.toFixed(2) + " s"; });
+  bind("sustain", "sustain", function (v) { return v.toFixed(2); });
+  bind("release", "release", function (v) { return v.toFixed(2) + " s"; });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); selectWave("sawtooth"); }
+    Shell.gate(ctx, $("start"), function () {
+      $("note").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Hold the Play-note button and shape the filter and amp envelopes.");
+    });
+  });
+  $("note").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!noteHeld) noteOn(); else noteOff();
+  });
+})();
+</script>
+</body>
+</html>

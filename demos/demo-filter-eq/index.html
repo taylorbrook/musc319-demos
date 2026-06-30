@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-filter-eq (slug: filter-eq)
+  An EQ / filter explorer for the Monday "EQ & filters" session (wk04-mon-eq-filters).
+  It makes the session's central claim audible: EQ and filtering are the same operation
+  at two scales, both reshape the distribution of energy across the spectrum, used
+  either correctively (cut a problem) or creatively (a filter sweep as a gesture).
+
+  A harmonically rich source (a sawtooth, optionally sweetened with white noise) runs
+  through one biquad filter whose TYPE (lowpass / highpass / bandpass / peaking),
+  CUTOFF, and Q the player sets. The live spectrum (FFT) is drawn so the filter's
+  effect on the energy distribution is visible while it is heard, and a one-press
+  "Sweep" automates the cutoff so the filter sweep can be heard as the compositional
+  gesture the page frames it as.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step. Hosted
+  on GitHub Pages and embedded into the Canvas page via an <iframe>. Browsers suspend
+  the AudioContext until a user gesture and a cross-origin iframe cannot rely on
+  autoplay, so audio NEVER starts on load: the Start button calls audioContext.resume()
+  from inside the demo (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: EQ &amp; filters (shape the spectrum)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  /* demo-specific layout only; palette, wrapper, focus ring, scope from shell.css */
+  .sweepbtn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#scope { height: 150px; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>EQ &amp; filters: shape the spectrum</h1>
+  <p class="instructions">
+    A harmonically rich tone runs through one <strong>filter</strong>. Pick its <strong>shape</strong>
+    (lowpass, highpass, bandpass, peaking), set the <strong>cutoff</strong> and <strong>Q</strong>, and watch the
+    live <strong>spectrum</strong> redistribute its energy as you hear it change. The same control used
+    <strong>correctively</strong> cuts a problem; swept, it becomes a <strong>compositional gesture</strong>.
+    Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play tone</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the filter</legend>
+    <div class="row" style="margin-bottom:14px;">
+      <button id="t-lowpass" class="ftype" type="button">Lowpass</button>
+      <button id="t-highpass" class="ftype" type="button">Highpass</button>
+      <button id="t-bandpass" class="ftype" type="button">Bandpass</button>
+      <button id="t-peaking" class="ftype" type="button">Peaking</button>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label for="cutoff">Cutoff <span class="val" id="cutoff-v">800 Hz</span></label>
+        <input id="cutoff" type="range" min="80" max="12000" step="1" value="800">
+      </div>
+      <div class="ctl">
+        <label for="q">Q (resonance / width) <span class="val" id="q-v">1.0</span></label>
+        <input id="q" type="range" min="0.3" max="24" step="0.1" value="1">
+      </div>
+      <div class="ctl">
+        <label for="gain">Peak gain <span class="val" id="gain-v">0 dB</span></label>
+        <input id="gain" type="range" min="-24" max="24" step="0.5" value="0">
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <button id="sweep" class="sweepbtn" type="button">&#10227; Sweep the cutoff (gesture)</button>
+      <span class="note" style="margin:0;">A swept filter is a compositional move, not just a corrective one.</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT)</legend>
+    <canvas id="scope" width="780" height="150" aria-label="Live frequency spectrum of the filtered tone"></canvas>
+    <p class="note">
+      The curve is the live energy across the spectrum. A <strong>lowpass</strong> rolls off the highs, a
+      <strong>highpass</strong> the lows, a <strong>bandpass</strong> keeps a band, and <strong>peaking</strong> boosts or cuts
+      around the cutoff. Raise <strong>Q</strong> to hear the filter ring at its corner.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, src = null, noiseSrc = null, filter = null, scopeTap = null;
+  var playing = false, sweeping = false, sweepReq = null;
+  var params = { type: "lowpass", cutoff: 800, q: 1, gain: 0 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0;
+
+    // harmonically rich source: a sawtooth plus a touch of noise for energy across the band
+    src = ctx.createOscillator(); src.type = "sawtooth"; src.frequency.value = 110;
+    var srcG = ctx.createGain(); srcG.gain.value = 0.6;
+    noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = buildNoise(); noiseSrc.loop = true;
+    var noiseG = ctx.createGain(); noiseG.gain.value = 0.12;
+
+    filter = ctx.createBiquadFilter();
+    filter.type = params.type;
+    filter.frequency.value = params.cutoff;
+    filter.Q.value = params.q;
+    filter.gain.value = params.gain;
+
+    var mix = ctx.createGain(); mix.gain.value = 1.0;
+    src.connect(srcG).connect(filter);
+    noiseSrc.connect(noiseG).connect(filter);
+    filter.connect(mix).connect(master);
+
+    Shell.connectMaster(ctx, master);
+
+    // scope taps the post-filter signal so the spectrum reflects the filtering (D-07)
+    scopeTap = mix;
+    Shell.createScope(ctx, scopeTap, $("scope"), "fft");
+
+    src.start(); noiseSrc.start();
+  }
+
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 0.5);
+    var buf = ctx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function applyFilter(smooth) {
+    if (!filter) return;
+    var t = ctx.currentTime;
+    filter.type = params.type;
+    if (smooth) {
+      filter.frequency.linearRampToValueAtTime(params.cutoff, t + 0.03);
+      filter.Q.linearRampToValueAtTime(params.q, t + 0.03);
+    } else {
+      filter.frequency.setValueAtTime(params.cutoff, t);
+      filter.Q.setValueAtTime(params.q, t);
+    }
+    filter.gain.setValueAtTime(params.gain, t);
+  }
+
+  function setTone(on) {
+    if (!ctx || !master) return;
+    playing = on;
+    var t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.9 : 0.0, t + 0.05);
+    $("play").innerHTML = on ? "&#9632; Stop tone" : "&#9658; Play tone";
+  }
+
+  // ---- filter-type buttons ----
+  var typeBtns = { lowpass: "t-lowpass", highpass: "t-highpass", bandpass: "t-bandpass", peaking: "t-peaking" };
+  function selectType(type) {
+    params.type = type;
+    Object.keys(typeBtns).forEach(function (k) {
+      $(typeBtns[k]).classList.toggle("active", k === type);
+    });
+    $("gain").disabled = (type !== "peaking");
+    applyFilter(false);
+  }
+  Object.keys(typeBtns).forEach(function (k) {
+    $(typeBtns[k]).addEventListener("click", function () { selectType(k); });
+  });
+
+  // ---- sliders ----
+  $("cutoff").addEventListener("input", function () {
+    params.cutoff = +this.value; $("cutoff-v").textContent = Math.round(params.cutoff) + " Hz"; applyFilter(true);
+  });
+  $("q").addEventListener("input", function () {
+    params.q = +this.value; $("q-v").textContent = params.q.toFixed(1); applyFilter(true);
+  });
+  $("gain").addEventListener("input", function () {
+    params.gain = +this.value; $("gain-v").textContent = params.gain.toFixed(1) + " dB"; applyFilter(true);
+  });
+
+  // ---- automated cutoff sweep (the "gesture") ----
+  $("sweep").addEventListener("click", function () {
+    if (!ctx) return;
+    sweeping = !sweeping;
+    this.classList.toggle("active", sweeping);
+    if (sweeping) {
+      if (!playing) setTone(true);
+      var t0 = ctx.currentTime;
+      sweepStart = t0;
+      sweepReq = requestAnimationFrame(sweepFrame);
+      setStatus("Sweeping the cutoff up and down: that motion is the gesture.");
+    } else {
+      if (sweepReq) cancelAnimationFrame(sweepReq);
+      setStatus("Sweep stopped.");
+    }
+  });
+  var sweepStart = 0;
+  function sweepFrame() {
+    if (!sweeping) return;
+    var phase = (ctx.currentTime - sweepStart) % 4 / 4;      // 4 s cycle
+    var tri = phase < 0.5 ? phase * 2 : (1 - phase) * 2;     // 0..1..0 triangle
+    var lo = 120, hi = 9000;
+    params.cutoff = lo * Math.pow(hi / lo, tri);             // exponential sweep
+    filter.frequency.setTargetAtTime(params.cutoff, ctx.currentTime, 0.02);
+    $("cutoff").value = String(Math.round(params.cutoff));
+    $("cutoff-v").textContent = Math.round(params.cutoff) + " Hz";
+    sweepReq = requestAnimationFrame(sweepFrame);
+  }
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); selectType("lowpass"); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then pick a filter shape and move the cutoff.");
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setTone(!playing);
+    setStatus(playing ? "Playing. Move the cutoff and Q; watch the spectrum." : "Stopped.");
+  });
+
+  // initial label state
+  selectTypeInit();
+  function selectTypeInit() {
+    $("t-lowpass").classList.add("active");
+    $("gain").disabled = true;
+  }
+})();
+</script>
+</body>
+</html>

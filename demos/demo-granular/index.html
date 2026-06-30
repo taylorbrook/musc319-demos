@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-granular (slug: granular)
+  Granular synthesis: a short source sound is shattered into grains and
+  reassembled. Move the grain size, grain density, position, and the pitch and
+  position spray, and watch the grain cloud accumulate as you hear a single
+  fragment thicken into a continuous, shimmering texture. Freeze the position to
+  sustain one moment indefinitely.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step:
+  open by double-clicking this file. Hosted on GitHub Pages and embedded into the
+  Canvas page via an <iframe> (deploy + UBC iframe domain allow-listing still
+  pending). Browsers suspend the AudioContext until a user gesture and a
+  cross-origin iframe cannot rely on autoplay, so audio NEVER starts on load:
+  the Start button calls audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Granular synthesis (grains into a cloud of texture)</title>
+<style>
+  :root {
+    --accent: #1D4ED8;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: #FFFFFF;
+    line-height: 1.5;
+  }
+  .demo { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    margin: 0 0 16px;
+  }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.preset { font-size: 14px; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 22px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .freeze label { font-weight: 600; font-size: 14px; }
+  .status { font-size: 14px; color: var(--muted); min-height: 1.4em; margin: 8px 0 0; }
+  canvas { width: 100%; height: 200px; border: 1px solid var(--border); border-radius: 8px; display: block; background: #FFFFFF; }
+  .scopecap { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>Granular synthesis: turn a short sound into a cloud of grains</h1>
+  <p class="instructions">
+    The synth reads a short source sound and sprays it out as overlapping <strong>grains</strong>,
+    each a few to tens of milliseconds long. Raise the <strong>grain density</strong> to thicken a
+    single fragment into a continuous <strong>cloud</strong>, add <strong>pitch</strong> and
+    <strong>position spray</strong> to make it shimmer, and <strong>freeze</strong> the read position
+    to sustain one moment as a held texture. Press Start to enable sound, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: shape the grains</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="size">Grain size <span class="val" id="size-v">40 ms</span></label>
+        <input id="size" type="range" min="3" max="120" step="1" value="40">
+      </div>
+      <div class="ctl">
+        <label for="density">Grain density <span class="val" id="density-v">25 grains/s</span></label>
+        <input id="density" type="range" min="2" max="120" step="1" value="25">
+      </div>
+      <div class="ctl">
+        <label for="pos">Read position <span class="val" id="pos-v">0.35</span></label>
+        <input id="pos" type="range" min="0" max="1" step="0.001" value="0.35">
+      </div>
+      <div class="ctl">
+        <label for="pitch">Pitch <span class="val" id="pitch-v">0 st</span></label>
+        <input id="pitch" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+      <div class="ctl">
+        <label for="pspray">Pitch spray <span class="val" id="pspray-v">0 st</span></label>
+        <input id="pspray" type="range" min="0" max="12" step="0.5" value="0">
+      </div>
+      <div class="ctl">
+        <label for="xspray">Position spray <span class="val" id="xspray-v">0.05</span></label>
+        <input id="xspray" type="range" min="0" max="0.5" step="0.005" value="0.05">
+      </div>
+    </div>
+    <div class="row freeze" style="margin-top:12px;">
+      <input id="freeze" type="checkbox">
+      <label for="freeze">Freeze read position (sustain one moment as a held texture)</label>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <button id="preset-cloud" class="preset" type="button">Preset: dense cloud</button>
+      <button id="preset-buzz" class="preset" type="button">Preset: short-grain buzz</button>
+      <button id="preset-shimmer" class="preset" type="button">Preset: frozen shimmer</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The grain cloud (each dot is one grain: time across, read position up)</legend>
+    <canvas id="cloud" width="700" height="200" aria-hidden="true"></canvas>
+    <p class="scopecap" id="readout">
+      Each grain appears as a dot as it fires. Denser grains fill the cloud; more position spray
+      spreads it vertically; freezing pins the read position to a horizontal band.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, sourceBuffer = null, playing = false;
+  var scheduler = null, nextGrainTime = 0;
+  var LOOKAHEAD = 0.1;        // schedule grains this far ahead (s)
+  var TICK = 25;              // scheduler wakeup (ms)
+
+  var params = {
+    size: 0.040,             // grain size in seconds
+    density: 25,             // grains per second
+    pos: 0.35,               // read position 0..1 into the buffer
+    pitch: 0,                // semitones
+    pspray: 0,               // pitch spray, semitones
+    xspray: 0.05,            // position spray, fraction of buffer
+    freeze: false
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---- a deterministic-ish source sound with internal movement, so freezing /
+  //      granulating it is musical: two detuned tones plus a slow timbral sweep.
+  function buildSource() {
+    var sr = ctx.sampleRate;
+    var dur = 2.4;
+    var len = Math.floor(sr * dur);
+    var buf = ctx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) {
+      var t = i / sr;
+      // glide the fundamental slowly so different read positions differ in pitch
+      var f = 180 + 90 * (t / dur);
+      // a few harmonics whose balance drifts over time (internal movement)
+      var bright = 0.5 + 0.5 * Math.sin(2 * Math.PI * 0.35 * t);
+      var s = Math.sin(2 * Math.PI * f * t)
+            + 0.5 * bright * Math.sin(2 * Math.PI * 2 * f * t)
+            + 0.3 * bright * Math.sin(2 * Math.PI * 3 * f * t)
+            + 0.18 * Math.sin(2 * Math.PI * (f * 1.005) * t); // gentle detune beat
+      // a soft overall envelope so the buffer edges are quiet
+      var env = Math.min(1, t / 0.05, (dur - t) / 0.1);
+      d[i] = 0.22 * env * s;
+    }
+    return buf;
+  }
+
+  function ensureContext() {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain();
+      master.gain.value = 0.0;
+      Shell.connectMaster(ctx, master);
+      sourceBuffer = buildSource();
+    }
+    return ctx;
+  }
+
+  // ---- spawn one grain at absolute time `when` ----
+  function spawnGrain(when) {
+    var dur = params.size;
+    var sprayPos = (Math.random() * 2 - 1) * params.xspray;
+    var pos = params.pos + sprayPos;
+    if (pos < 0) pos = 0;
+    if (pos > 0.999) pos = 0.999;
+    var offset = pos * (sourceBuffer.duration - dur - 0.02);
+    if (offset < 0) offset = 0;
+
+    var semis = params.pitch + (Math.random() * 2 - 1) * params.pspray;
+    var rate = Math.pow(2, semis / 12);
+
+    var src = ctx.createBufferSource();
+    src.buffer = sourceBuffer;
+    src.playbackRate.value = rate;
+
+    var g = ctx.createGain();
+    // triangular / raised envelope: ramp up then down (a soft grain window)
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(1.0, when + dur * 0.5);
+    g.gain.linearRampToValueAtTime(0.0001, when + dur);
+
+    src.connect(g).connect(master);
+    try {
+      src.start(when, offset, dur * rate + 0.02);
+      src.stop(when + dur + 0.03);
+    } catch (e) { /* ignore late starts */ }
+
+    plotGrain(pos, semis);
+  }
+
+  function scheduleLoop() {
+    var period = 1 / params.density;
+    while (nextGrainTime < ctx.currentTime + LOOKAHEAD) {
+      spawnGrain(nextGrainTime);
+      nextGrainTime += period;
+    }
+  }
+
+  // ---- controls ----
+  function bind(id, key, fmt, scale) {
+    var el = $(id), out = $(id + "-v");
+    el.addEventListener("input", function () {
+      var v = +el.value;
+      params[key] = scale ? scale(v) : v;
+      out.textContent = fmt(v);
+    });
+  }
+  bind("size", "size", function (v) { return v + " ms"; }, function (v) { return v / 1000; });
+  bind("density", "density", function (v) { return v + " grains/s"; });
+  bind("pos", "pos", function (v) { return (+v).toFixed(2); });
+  bind("pitch", "pitch", function (v) { return v + " st"; });
+  bind("pspray", "pspray", function (v) { return v + " st"; });
+  bind("xspray", "xspray", function (v) { return (+v).toFixed(2); });
+  $("freeze").addEventListener("change", function (e) {
+    params.freeze = e.target.checked;
+  });
+
+  function applyPreset(p) {
+    for (var k in p) if (p.hasOwnProperty(k)) {
+      params[k] = p[k];
+    }
+    // reflect into the UI
+    $("size").value = String(Math.round(params.size * 1000));
+    $("size-v").textContent = Math.round(params.size * 1000) + " ms";
+    $("density").value = String(params.density);
+    $("density-v").textContent = params.density + " grains/s";
+    $("pos").value = String(params.pos);
+    $("pos-v").textContent = params.pos.toFixed(2);
+    $("pitch").value = String(params.pitch);
+    $("pitch-v").textContent = params.pitch + " st";
+    $("pspray").value = String(params.pspray);
+    $("pspray-v").textContent = params.pspray + " st";
+    $("xspray").value = String(params.xspray);
+    $("xspray-v").textContent = params.xspray.toFixed(2);
+    $("freeze").checked = params.freeze;
+  }
+
+  $("preset-cloud").addEventListener("click", function () {
+    applyPreset({ size: 0.060, density: 80, pitch: 0, pspray: 2, xspray: 0.20, freeze: false });
+    setStatus("Dense cloud: many overlapping grains across the source make a continuous texture.");
+  });
+  $("preset-buzz").addEventListener("click", function () {
+    applyPreset({ size: 0.006, density: 100, pitch: 0, pspray: 0, xspray: 0.0, freeze: true });
+    setStatus("Short-grain buzz: very short grains at a steady period read as a pitched tone.");
+  });
+  $("preset-shimmer").addEventListener("click", function () {
+    applyPreset({ size: 0.050, density: 45, pitch: 0, pspray: 5, xspray: 0.04, freeze: true });
+    setStatus("Frozen shimmer: the read position is pinned, and pitch spray makes it glisten.");
+  });
+
+  $("start").addEventListener("click", function () {
+    ensureContext();
+    ctx.resume().then(function () {
+      $("play").disabled = false;
+      $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then move the grain controls.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true;
+      nextGrainTime = ctx.currentTime + 0.05;
+      var now = ctx.currentTime;
+      master.gain.cancelScheduledValues(now);
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.linearRampToValueAtTime(0.9, now + 0.05);
+      scheduler = setInterval(scheduleLoop, TICK);
+      $("play").innerHTML = "&#9632; Stop";
+      setStatus("Playing. Raise density for a cloud, add spray to shimmer, or freeze the position.");
+    } else {
+      playing = false;
+      clearInterval(scheduler); scheduler = null;
+      var t = ctx.currentTime;
+      master.gain.cancelScheduledValues(t);
+      master.gain.setValueAtTime(master.gain.value, t);
+      master.gain.linearRampToValueAtTime(0.0001, t + 0.05);
+      $("play").innerHTML = "&#9658; Play";
+      setStatus("Stopped.");
+    }
+  });
+
+  // ---- grain-cloud visual: scrolling scatter, x = time, y = read position ----
+  var canvas = $("cloud"), cctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+  var pending = [];   // grains fired since last frame: {pos, semis}
+
+  function plotGrain(pos, semis) { pending.push({ pos: pos, semis: semis }); }
+
+  function frame() {
+    // scroll left by 2px, fading slightly
+    var img = cctx.getImageData(2, 0, W - 2, H);
+    cctx.clearRect(0, 0, W, H);
+    cctx.putImageData(img, 0, 0);
+    cctx.fillStyle = "rgba(255,255,255,0.06)";
+    cctx.fillRect(0, 0, W, H);
+    // draw new grains at the right edge
+    for (var i = 0; i < pending.length; i++) {
+      var gr = pending[i];
+      var y = H - gr.pos * (H - 10) - 5;
+      // color: blue, warmer when pitch-shifted up
+      var up = Math.max(0, Math.min(1, (gr.semis + 12) / 24));
+      var r = Math.round(29 + up * 165);
+      var g = Math.round(78 - up * 20);
+      var b = Math.round(216 - up * 180);
+      cctx.fillStyle = "rgba(" + r + "," + g + "," + b + ",0.85)";
+      cctx.beginPath();
+      cctx.arc(W - 4, y, 2.4, 0, 2 * Math.PI);
+      cctx.fill();
+    }
+    pending.length = 0;
+    // freeze guide line
+    if (params.freeze) {
+      var fy = H - params.pos * (H - 10) - 5;
+      cctx.strokeStyle = "rgba(194,65,12,0.5)";
+      cctx.lineWidth = 1;
+      cctx.beginPath(); cctx.moveTo(0, fy); cctx.lineTo(W, fy); cctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  }
+  cctx.fillStyle = "#FFFFFF"; cctx.fillRect(0, 0, W, H);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

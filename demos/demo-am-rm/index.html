@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-am-rm (slug: am-rm)
+  Amplitude modulation and ring modulation for the Monday "saturation & distortion"
+  session (wk05-mon-saturation), where AM and RM extend saturation's harmonic idea
+  into sound design. It makes the session's claim audible: both AM and RM generate
+  SIDEBANDS around a tone, and ring modulation in particular removes the carrier to
+  leave the metallic, INHARMONIC pair that classic electronic timbres rely on.
+
+  Two sine oscillators: a CARRIER and a MODULATOR. The modulator drives a GainNode
+  the carrier passes through:
+      AM: gain = 1 + depth*mod   -> carrier survives, a sideband pair is added
+      RM: gain =     depth*mod   -> bipolar product, carrier cancelled, inharmonic pair
+  A live spectrum (FFT) shows the sidebands appear (AM) and the carrier vanish (RM).
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step. Hosted
+  on GitHub Pages and embedded into the Canvas page via an <iframe>. Audio NEVER starts
+  on load: the Start button calls audioContext.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: AM &amp; ring modulation (sidebands &amp; inharmonic spectra)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .mode-btn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#scope { height: 150px; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>AM &amp; ring modulation: sidebands and inharmonic spectra</h1>
+  <p class="instructions">
+    A <strong>carrier</strong> tone is multiplied by a <strong>modulator</strong>. In <strong>amplitude modulation</strong>
+    the carrier survives and a <strong>sideband pair</strong> appears around it; in <strong>ring modulation</strong> the
+    carrier is removed, leaving the metallic, <strong>inharmonic</strong> pair that classic electronic timbres use.
+    Watch the spectrum as you switch modes and move the modulator frequency. Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the modulation</legend>
+    <div class="row" style="margin-bottom:14px;">
+      <button id="m-am" class="mode-btn" type="button">Amplitude modulation</button>
+      <button id="m-rm" class="mode-btn" type="button">Ring modulation</button>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label for="carrier">Carrier frequency <span class="val" id="carrier-v">440 Hz</span></label>
+        <input id="carrier" type="range" min="110" max="880" step="1" value="440">
+      </div>
+      <div class="ctl">
+        <label for="modfreq">Modulator frequency <span class="val" id="modfreq-v">120 Hz</span></label>
+        <input id="modfreq" type="range" min="1" max="1200" step="1" value="120">
+      </div>
+      <div class="ctl">
+        <label for="depth">Depth <span class="val" id="depth-v">0.80</span></label>
+        <input id="depth" type="range" min="0" max="1" step="0.01" value="0.8">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT)</legend>
+    <canvas id="scope" width="780" height="150" aria-label="Live frequency spectrum showing AM/RM sidebands"></canvas>
+    <p class="note">
+      In <strong>AM</strong> you see three peaks: the carrier plus a sideband above and below it.
+      Switch to <strong>RM</strong> and the centre carrier <strong>disappears</strong>, leaving the two sidebands &mdash; that
+      removal is what makes ring modulation sound metallic and inharmonic.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, carrier = null, modulator = null, modScale = null, modBias = null;
+  var ringGain = null, scopeBus = null;
+  var playing = false;
+  var params = { mode: "am", carrier: 440, modfreq: 120, depth: 0.8 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0;
+
+    // carrier -> ringGain (gain modulated by the modulator) -> scope -> master
+    carrier = ctx.createOscillator(); carrier.type = "sine"; carrier.frequency.value = params.carrier;
+    ringGain = ctx.createGain(); ringGain.gain.value = 0.0;   // AudioParam driven by modulator
+
+    // modulator -> modScale (depth) -> ringGain.gain ; AM adds a DC bias of 1
+    modulator = ctx.createOscillator(); modulator.type = "sine"; modulator.frequency.value = params.modfreq;
+    modScale = ctx.createGain(); modScale.gain.value = params.depth;
+    modulator.connect(modScale).connect(ringGain.gain);
+
+    // constant 1.0 source for the AM bias (carrier survives); 0 for pure RM
+    modBias = ctx.createConstantSource();
+    modBias.offset.value = (params.mode === "am") ? 1.0 : 0.0;
+    modBias.connect(ringGain.gain);
+
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 0.5;
+    carrier.connect(ringGain).connect(scopeBus).connect(master);
+
+    Shell.connectMaster(ctx, master);
+    Shell.createScope(ctx, scopeBus, $("scope"), "fft");     // sidebands visible (D-07)
+
+    carrier.start(); modulator.start(); modBias.start();
+  }
+
+  function applyParams() {
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    carrier.frequency.setTargetAtTime(params.carrier, t, 0.02);
+    modulator.frequency.setTargetAtTime(params.modfreq, t, 0.02);
+    modScale.gain.setTargetAtTime(params.depth, t, 0.02);
+    modBias.offset.setTargetAtTime(params.mode === "am" ? 1.0 : 0.0, t, 0.02);
+  }
+
+  function setTone(on) {
+    if (!ctx || !master) return;
+    playing = on;
+    var t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.7 : 0.0, t + 0.05);
+    $("play").innerHTML = on ? "&#9632; Stop" : "&#9658; Play";
+  }
+
+  // ---- mode buttons ----
+  var modeBtns = { am: "m-am", rm: "m-rm" };
+  function selectMode(mode) {
+    params.mode = mode;
+    Object.keys(modeBtns).forEach(function (k) { $(modeBtns[k]).classList.toggle("active", k === mode); });
+    applyParams();
+    setStatus(mode === "am"
+      ? "Amplitude modulation: carrier plus a sideband pair."
+      : "Ring modulation: carrier removed, only the inharmonic sidebands remain.");
+  }
+  Object.keys(modeBtns).forEach(function (k) {
+    $(modeBtns[k]).addEventListener("click", function () { selectMode(k); });
+  });
+
+  // ---- sliders ----
+  $("carrier").addEventListener("input", function () {
+    params.carrier = +this.value; $("carrier-v").textContent = Math.round(params.carrier) + " Hz"; applyParams();
+  });
+  $("modfreq").addEventListener("input", function () {
+    params.modfreq = +this.value; $("modfreq-v").textContent = Math.round(params.modfreq) + " Hz"; applyParams();
+  });
+  $("depth").addEventListener("input", function () {
+    params.depth = +this.value; $("depth-v").textContent = params.depth.toFixed(2); applyParams();
+  });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); selectMode("am"); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then switch AM/RM and move the modulator.");
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setTone(!playing);
+    setStatus(playing ? "Playing. Move the modulator frequency; switch AM/RM and watch the carrier." : "Stopped.");
+  });
+
+  $("m-am").classList.add("active");
+})();
+</script>
+</body>
+</html>

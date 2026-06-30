@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-adsr (slug: adsr)
+  An amplitude-envelope (ADSR) explorer for the Wednesday "sampling" session
+  (wk05-wed-sampling), where samplers expose an amp ADSR over a found sound (D-02
+  new wire). It makes the four-stage envelope audible and visible: ATTACK, DECAY,
+  SUSTAIN, RELEASE shape the LEVEL of a held note over time.
+
+  A single oscillator runs into an envelope GainNode. On note-on the gain ramps up
+  over attack, falls to the sustain level over decay, holds at sustain while held,
+  then falls to zero over release on note-off. A live time-domain scope draws the
+  envelope so the four stages are visible while they are heard.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step. Hosted
+  on GitHub Pages and embedded into the Canvas page via an <iframe>. Audio NEVER starts
+  on load: the Start button calls audioContext.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: ADSR envelope (attack, decay, sustain, release)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  canvas#scope { height: 150px; }
+  canvas#env { height: 110px; }
+  .scopebox h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 4px; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>ADSR envelope: shape a note over time</h1>
+  <p class="instructions">
+    A sampler (and every synth voice) shapes a note's <strong>level over time</strong> with an
+    <strong>ADSR</strong> envelope: <strong>attack</strong> in, <strong>decay</strong> down to a <strong>sustain</strong> level held while
+    you hold the note, then <strong>release</strong> out when you let go. Hold the Play-note button and watch the
+    envelope draw itself. Press Start, then play a note.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="note" class="play" type="button" disabled>&#9658; Play note (hold)</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the envelope (ADSR)</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="attack">Attack <span class="val" id="attack-v">0.02 s</span></label>
+        <input id="attack" type="range" min="0.001" max="2" step="0.001" value="0.02">
+      </div>
+      <div class="ctl">
+        <label for="decay">Decay <span class="val" id="decay-v">0.30 s</span></label>
+        <input id="decay" type="range" min="0.01" max="2" step="0.01" value="0.3">
+      </div>
+      <div class="ctl">
+        <label for="sustain">Sustain <span class="val" id="sustain-v">0.50</span></label>
+        <input id="sustain" type="range" min="0" max="1" step="0.01" value="0.5">
+      </div>
+      <div class="ctl">
+        <label for="release">Release <span class="val" id="release-v">0.60 s</span></label>
+        <input id="release" type="range" min="0.01" max="3" step="0.01" value="0.6">
+      </div>
+      <div class="ctl">
+        <label for="pitch">Pitch <span class="val" id="pitch-v">220 Hz</span></label>
+        <input id="pitch" type="range" min="55" max="880" step="1" value="220">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>What you are shaping</legend>
+    <div class="scopebox">
+      <h2>The ADSR shape (idealized)</h2>
+      <canvas id="env" width="780" height="110" aria-label="Idealized ADSR envelope shape"></canvas>
+    </div>
+    <div class="scopebox" style="margin-top:14px;">
+      <h2>Live output (time domain)</h2>
+      <canvas id="scope" width="780" height="150" aria-label="Live waveform of the enveloped note"></canvas>
+    </div>
+    <p class="note">
+      Attack and release set the in/out times; decay falls to the sustain level, which holds while you hold the
+      note. Short attack + short release is percussive; long attack + long release is a slow swell.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, env = null, scopeBus = null, voice = null;
+  var noteHeld = false;
+  var params = { attack: 0.02, decay: 0.3, sustain: 0.5, release: 0.6, pitch: 220 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.9;
+    env = ctx.createGain(); env.gain.value = 0.0;            // the ADSR-shaped amplitude
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 1.0;
+    env.connect(scopeBus).connect(master);
+    Shell.connectMaster(ctx, master);
+    // optional time-domain scope (D-07) — it makes the envelope legible
+    Shell.createScope(ctx, scopeBus, $("scope"), "scope");
+  }
+
+  function noteOn() {
+    if (!ctx || noteHeld) return;
+    noteHeld = true;
+    var t = ctx.currentTime;
+    voice = ctx.createOscillator(); voice.type = "sawtooth"; voice.frequency.setValueAtTime(params.pitch, t);
+    voice.connect(env); voice.start(t);
+
+    env.gain.cancelScheduledValues(t);
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.linearRampToValueAtTime(0.9, t + params.attack);                                 // attack
+    env.gain.linearRampToValueAtTime(0.9 * params.sustain + 0.0001, t + params.attack + params.decay); // decay -> sustain
+
+    $("note").innerHTML = "&#9632; Release note";
+    setStatus("Held: attack in, decay to sustain. Release to hear the release stage.");
+  }
+
+  function noteOff() {
+    if (!ctx || !noteHeld) return;
+    noteHeld = false;
+    var t = ctx.currentTime;
+    env.gain.cancelScheduledValues(t);
+    env.gain.setValueAtTime(env.gain.value, t);
+    env.gain.linearRampToValueAtTime(0.0001, t + params.release);                             // release
+    if (voice) { try { voice.stop(t + params.release + 0.05); } catch (e) {} }
+    $("note").innerHTML = "&#9658; Play note (hold)";
+    setStatus("Released: the release time set how long the tail held.");
+  }
+
+  // ---- idealized ADSR shape drawing ----
+  function drawEnvelope() {
+    var c = $("env"), g = c.getContext("2d"), W = c.width, H = c.height;
+    g.clearRect(0, 0, W, H);
+    var pad = 8, baseY = H - pad, topY = pad;
+    // scale the four times into the width (with a fixed sustain-hold segment)
+    var a = params.attack, d = params.decay, r = params.release, holdT = 0.6;
+    var total = a + d + holdT + r;
+    function x(time) { return pad + (time / total) * (W - 2 * pad); }
+    function y(level) { return baseY - level * (baseY - topY); }
+    g.strokeStyle = "#1D4ED8"; g.lineWidth = 2; g.beginPath();
+    g.moveTo(x(0), y(0));
+    g.lineTo(x(a), y(1));                              // attack
+    g.lineTo(x(a + d), y(params.sustain));            // decay
+    g.lineTo(x(a + d + holdT), y(params.sustain));    // sustain hold
+    g.lineTo(x(total), y(0));                          // release
+    g.stroke();
+    // stage labels
+    g.fillStyle = "#52525B"; g.font = "11px sans-serif"; g.textAlign = "center";
+    g.fillText("A", x(a / 2), baseY + 0);
+    g.fillText("D", x(a + d / 2), baseY + 0);
+    g.fillText("S", x(a + d + holdT / 2), baseY + 0);
+    g.fillText("R", x(a + d + holdT + r / 2), baseY + 0);
+  }
+
+  // ---- sliders ----
+  function bind(id, key, fmt) {
+    $(id).addEventListener("input", function () {
+      params[key] = +this.value; $(id + "-v").textContent = fmt(params[key]);
+      if (key === "pitch" && voice) voice.frequency.setValueAtTime(params.pitch, ctx.currentTime);
+      drawEnvelope();
+    });
+  }
+  bind("attack", "attack", function (v) { return v.toFixed(3) + " s"; });
+  bind("decay", "decay", function (v) { return v.toFixed(2) + " s"; });
+  bind("sustain", "sustain", function (v) { return v.toFixed(2); });
+  bind("release", "release", function (v) { return v.toFixed(2) + " s"; });
+  bind("pitch", "pitch", function (v) { return Math.round(v) + " Hz"; });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); }
+    Shell.gate(ctx, $("start"), function () {
+      $("note").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Hold the Play-note button and shape the envelope.");
+    });
+  });
+  $("note").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!noteHeld) noteOn(); else noteOff();
+  });
+
+  drawEnvelope();
+})();
+</script>
+</body>
+</html>

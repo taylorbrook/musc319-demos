@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-acoustics (slug: acoustics)
+  Pure sine vs complex tone at the SAME pitch: the audible difference is timbre.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step:
+  open by double-clicking this file. Hosted on GitHub Pages and embedded into the
+  Canvas page via an <iframe> (deploy + UBC iframe domain allow-listing still
+  pending). Browsers suspend the AudioContext until a user gesture and a
+  cross-origin iframe cannot rely on autoplay, so audio NEVER starts on load:
+  the Start button calls audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Pure sine vs complex tone</title>
+<style>
+  :root {
+    --accent: #1D4ED8;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: #FFFFFF;
+    line-height: 1.5;
+  }
+  .demo {
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 6px;
+  }
+  p.instructions {
+    font-size: 15px;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px 18px;
+    margin: 0 0 16px;
+  }
+  legend {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 0 6px;
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  button {
+    font: inherit;
+    font-size: 15px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start {
+    background: var(--accent);
+    color: #FFFFFF;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button.tone[aria-pressed="true"] {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 2px var(--accent);
+    font-weight: 600;
+  }
+  .status {
+    font-size: 14px;
+    color: var(--muted);
+    min-height: 1.4em;
+    margin: 4px 0 0;
+  }
+  canvas.scope {
+    width: 100%;
+    height: 150px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: block;
+    background: #FFFFFF;
+  }
+  p.scope-caption {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 10px 0 0;
+  }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>Pure sine vs complex tone</h1>
+  <p class="instructions">
+    Press Start to enable sound, then compare a pure sine with a complex tone at
+    the same pitch (220&nbsp;Hz). Same pitch, different timbre.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: compare</legend>
+    <div class="row">
+      <button id="sine" class="tone" type="button" disabled aria-pressed="false">
+        Play pure sine (220&nbsp;Hz)
+      </button>
+      <button id="complex" class="tone" type="button" disabled aria-pressed="false">
+        Play complex tone (same pitch)
+      </button>
+      <button id="stop" type="button" disabled>Stop</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Waveform (live oscilloscope)</legend>
+    <canvas id="scope" class="scope" width="540" height="150"
+            aria-label="Live time-domain waveform of the tone now playing"></canvas>
+    <p class="scope-caption">
+      The pure sine traces one smooth curve. The complex tone repeats at the same
+      rate but with a richer, lumpier shape, the added harmonics made visible.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+  // Dependency-free Web Audio. One shared context, one active voice at a time.
+  var audioCtx = null;
+  var master = null;       // envelope/attenuation gain (held low for hearing safety)
+  var scopeBus = null;     // unity-gain tap BEFORE master so the scope sees full amplitude
+  var voice = null;        // array of oscillators currently sounding
+  var current = null;      // "sine" | "complex" | null
+
+  var FUND = 220;          // fundamental, Hz / same pitch for both tones
+  // Complex tone: additive fundamental + a few harmonics at 1, 1/2, 1/3, 1/4.
+  var HARMONICS = [1, 2, 3, 4];
+  var HARM_AMPS = [1, 0.5, 0.3333, 0.25];
+
+  var startBtn = document.getElementById("start");
+  var sineBtn = document.getElementById("sine");
+  var complexBtn = document.getElementById("complex");
+  var stopBtn = document.getElementById("stop");
+  var statusEl = document.getElementById("status");
+
+  function setStatus(text) { statusEl.textContent = text; }
+
+  function ensureContext() {
+    if (!audioCtx) {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      audioCtx = new Ctx();
+      master = audioCtx.createGain();
+      master.gain.value = 0.0;
+      Shell.connectMaster(audioCtx, master);
+      // Voices feed a unity-gain bus that the scope taps, then the master
+      // envelope: the displayed waveform stays full-amplitude even though the
+      // audible output is held quiet.
+      scopeBus = audioCtx.createGain();
+      scopeBus.gain.value = 1.0;
+      scopeBus.connect(master);
+      Shell.createScope(audioCtx, scopeBus, document.getElementById("scope"), "scope");
+    }
+    return audioCtx;
+  }
+
+  // Start gesture: the click inside this iframe unlocks audio reliably,
+  // regardless of any parent autoplay permission. Never autoplay on load.
+  startBtn.addEventListener("click", function () {
+    ensureContext();
+    audioCtx.resume().then(function () {
+      sineBtn.disabled = false;
+      complexBtn.disabled = false;
+      stopBtn.disabled = false;
+      startBtn.disabled = true;
+      setStatus("Sound is on. Press a tone button to listen.");
+    });
+  });
+
+  function stopVoice() {
+    if (master) {
+      // Quick fade to avoid a click, then tear down the oscillators.
+      var now = audioCtx.currentTime;
+      master.gain.cancelScheduledValues(now);
+      master.gain.setValueAtTime(master.gain.value, now);
+      master.gain.linearRampToValueAtTime(0.0, now + 0.03);
+    }
+    if (voice) {
+      voice.forEach(function (osc) { try { osc.stop(); } catch (e) {} });
+      voice = null;
+    }
+    current = null;
+    sineBtn.setAttribute("aria-pressed", "false");
+    complexBtn.setAttribute("aria-pressed", "false");
+  }
+
+  function buildVoice(kind) {
+    var now = audioCtx.currentTime;
+    var oscs = [];
+    if (kind === "sine") {
+      var osc = audioCtx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = FUND;
+      var g = audioCtx.createGain();
+      g.gain.value = 1.0;
+      osc.connect(g).connect(scopeBus);
+      osc.start();
+      oscs.push(osc);
+    } else {
+      // Additive: stack sine partials on the harmonic series at FUND.
+      var norm = HARM_AMPS.reduce(function (a, b) { return a + b; }, 0);
+      for (var i = 0; i < HARMONICS.length; i++) {
+        var o = audioCtx.createOscillator();
+        o.type = "sine";
+        o.frequency.value = FUND * HARMONICS[i];
+        var gg = audioCtx.createGain();
+        gg.gain.value = HARM_AMPS[i] / norm;
+        o.connect(gg).connect(scopeBus);
+        o.start();
+        oscs.push(o);
+      }
+    }
+    // Gentle attack so switching tones does not click.
+    master.gain.cancelScheduledValues(now);
+    master.gain.setValueAtTime(0.0, now);
+    master.gain.linearRampToValueAtTime(0.18, now + 0.03);
+    return oscs;
+  }
+
+  function play(kind) {
+    ensureContext();
+    if (current === kind) { stopVoice(); setStatus("Stopped."); return; }
+    stopVoice();
+    voice = buildVoice(kind);
+    current = kind;
+    if (kind === "sine") {
+      sineBtn.setAttribute("aria-pressed", "true");
+      setStatus("Playing a pure sine at 220 Hz: one frequency only.");
+    } else {
+      complexBtn.setAttribute("aria-pressed", "true");
+      setStatus("Playing a complex tone at 220 Hz: fundamental plus harmonics, a fuller timbre.");
+    }
+  }
+
+  sineBtn.addEventListener("click", function () { play("sine"); });
+  complexBtn.addEventListener("click", function () { play("complex"); });
+  stopBtn.addEventListener("click", function () { stopVoice(); setStatus("Stopped."); });
+</script>
+</body>
+</html>
