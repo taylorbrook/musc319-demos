@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-spatial-panner (slug: spatial-panner)
+  A binaural spatialization explorer for the Friday spatial-and-immersive session,
+  and the technical primer the course carries into the Spatial I / Spatial II weeks
+  and the final project. A single sound source (a repeating noise burst, which
+  localizes far better than a steady tone) is fed through the Web Audio PannerNode.
+  You move the source around your head by azimuth (left/right), elevation
+  (up/down), and distance, and you switch the panning model between:
+
+    - HRTF (binaural): the browser applies a head-related transfer function, so the
+      source is placed in real 3D space using the same cues a real head gives:
+      the interaural TIME difference (it reaches the near ear first), the interaural
+      LEVEL difference (the head shadows the far ear), and the spectral colouring of
+      the outer ear. On HEADPHONES the source sounds outside your head, and you can
+      hear front vs back and some height.
+    - Stereo (equal-power): a plain left/right level pan. The image stays inside your
+      head, and front/back and height collapse. This is the contrast that shows what
+      a true spatial render adds over ordinary panning.
+
+  Press Orbit to send the source in a circle around you and watch the top-down radar.
+  HEADPHONES are essential for the HRTF mode.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe> (deploy +
+  UBC iframe domain allow-listing still pending). Browsers suspend the AudioContext
+  until a user gesture and a cross-origin iframe cannot rely on autoplay, so audio
+  NEVER starts on load: the Start button calls audioContext.resume() from inside.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Spatialization (binaural HRTF panner)</title>
+<style>
+  :root {
+    --accent: #9333EA;        /* culture-track accent */
+    --tech: #1D4ED8;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 800px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.mode.active { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 22px; margin-top: 4px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .stage { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  .reading { font-size: 13px; color: var(--muted); }
+  .reading b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  .hp { color: var(--warm); font-weight: 600; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>Spatialization: hear a sound move around your head</h1>
+  <p class="instructions">
+    One sound source is fed through the Web Audio <strong>panner</strong>. Move it by <strong>azimuth</strong>
+    (around you), <strong>elevation</strong> (up and down), and <strong>distance</strong>, then switch the panning model.
+    <strong>HRTF (binaural)</strong> places the source in real 3D using the same cues a head gives (time, level, and
+    ear-colour), so on headphones it sounds outside your head. <strong>Stereo</strong> is a plain left/right level pan that
+    stays inside your head. <span class="hp">Use headphones for the HRTF mode.</span> Press Start, then Play, then Orbit.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound (headphones recommended)</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play source</button>
+      <button id="orbit" type="button" disabled>&#8635; Orbit around me</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: choose the panning model (switch while it plays)</legend>
+    <div class="row">
+      <button class="mode active" type="button" data-mode="HRTF">HRTF (binaural, headphones)</button>
+      <button class="mode" type="button" data-mode="equalpower">Stereo (equal-power pan)</button>
+    </div>
+    <p class="status" id="mode-desc"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: place the source</legend>
+    <div class="stage">
+      <div>
+        <canvas id="radar" width="240" height="240" aria-label="Top-down view of your head and the sound source"></canvas>
+        <p class="reading" id="reading"></p>
+      </div>
+      <div style="flex:1; min-width:260px;">
+        <div class="controls">
+          <div class="ctl">
+            <label for="az">Azimuth <span class="val" id="az-v">+45&deg; (front-right)</span></label>
+            <input id="az" type="range" min="-180" max="180" step="1" value="45">
+          </div>
+          <div class="ctl">
+            <label for="el">Elevation <span class="val" id="el-v">0&deg; (ear level)</span></label>
+            <input id="el" type="range" min="-40" max="60" step="1" value="0">
+          </div>
+          <div class="ctl">
+            <label for="dist">Distance <span class="val" id="dist-v">2.0 m</span></label>
+            <input id="dist" type="range" min="0.5" max="8" step="0.1" value="2">
+          </div>
+          <div class="ctl">
+            <label for="rate">Source: burst rate <span class="val" id="rate-v">2.5 / s</span></label>
+            <input id="rate" type="range" min="0.5" max="6" step="0.1" value="2.5">
+          </div>
+        </div>
+        <p class="note" id="src-note">
+          The source is a short noise burst. Broadband transients carry the timing and head-shadow cues far better than a
+          steady tone, which is why a click train localizes more sharply than a hum.
+        </p>
+      </div>
+    </div>
+  </fieldset>
+
+  <p class="note">
+    Try this: set the model to <strong>Stereo</strong> and orbit. The sound only slides left to right, and stays in your
+    head. Switch to <strong>HRTF</strong> and orbit again: on headphones the source now travels around and behind you, and
+    you can raise it overhead with elevation. That difference is what a spatial render adds over a pan.
+  </p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, panner = null, noiseBuffer = null;
+  var playing = false, orbiting = false;
+  var burstTimer = null, drawReq = null;
+  var mode = "HRTF";
+  var params = { az: 45, el: 0, dist: 2, rate: 2.5 };
+  var orbitAngle = 45;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  var MODE_DESC = {
+    HRTF: "HRTF (binaural): the source is placed in 3D using time, level, and ear-colour cues. On headphones it sounds outside your head, with front, back, and height.",
+    equalpower: "Stereo (equal-power): a plain left/right level pan. The image stays inside your head, and front/back and height collapse to a line."
+  };
+
+  // ---------- source: a short filtered noise burst ----------
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 0.5);
+    var buf = ctx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function fireBurst() {
+    if (!ctx) return;
+    var now = ctx.currentTime;
+    var src = ctx.createBufferSource();
+    src.buffer = noiseBuffer;
+    var bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.frequency.value = 1400; bp.Q.value = 0.7;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.9, now + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0008, now + 0.16);
+    src.connect(bp).connect(g).connect(panner);
+    src.start(now); src.stop(now + 0.2);
+  }
+
+  function startBursts() {
+    stopBursts();
+    var period = 1000 / params.rate;
+    burstTimer = setInterval(fireBurst, period);
+    fireBurst();
+  }
+  function stopBursts() { if (burstTimer) { clearInterval(burstTimer); burstTimer = null; } }
+
+  // ---------- geometry: azimuth/elevation/distance -> x,y,z ----------
+  // Web Audio listener default: forward (0,0,-1), up (0,1,0), right (+x).
+  // Front of the listener is -z. Azimuth measured clockwise from front.
+  function updatePanner() {
+    var azr = params.az * Math.PI / 180;
+    var elr = params.el * Math.PI / 180;
+    var d = params.dist;
+    var x = d * Math.sin(azr) * Math.cos(elr);
+    var y = d * Math.sin(elr);
+    var z = -d * Math.cos(azr) * Math.cos(elr);
+    if (!panner) return;
+    if (panner.positionX) {
+      var t = ctx.currentTime + 0.02;
+      panner.positionX.linearRampToValueAtTime(x, t);
+      panner.positionY.linearRampToValueAtTime(y, t);
+      panner.positionZ.linearRampToValueAtTime(z, t);
+    } else if (panner.setPosition) {
+      panner.setPosition(x, y, z);
+    }
+  }
+
+  function makePanner() {
+    panner = ctx.createPanner();
+    panner.panningModel = mode;        // "HRTF" or "equalpower"
+    panner.distanceModel = "inverse";
+    panner.refDistance = 1;
+    panner.maxDistance = 20;
+    panner.rolloffFactor = 1;
+    if (ctx.listener.forwardX) {
+      ctx.listener.forwardX.value = 0; ctx.listener.forwardY.value = 0; ctx.listener.forwardZ.value = -1;
+      ctx.listener.upX.value = 0; ctx.listener.upY.value = 1; ctx.listener.upZ.value = 0;
+    } else if (ctx.listener.setOrientation) {
+      ctx.listener.setOrientation(0, 0, -1, 0, 1, 0);
+    }
+    panner.connect(master);
+    updatePanner();
+  }
+
+  function setMode(m) {
+    mode = m;
+    var btns = document.querySelectorAll("button.mode");
+    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle("active", btns[i].getAttribute("data-mode") === m);
+    $("mode-desc").textContent = MODE_DESC[m];
+    if (panner) panner.panningModel = m;
+  }
+
+  // ---------- radar drawing (top-down: x right, z up=front) ----------
+  function drawRadar() {
+    var c = $("radar"), g = c.getContext("2d");
+    var W = c.width, H = c.height, cx = W / 2, cy = H / 2, R = 96;
+    g.clearRect(0, 0, W, H);
+    // rings
+    g.strokeStyle = "#D4D4D8"; g.lineWidth = 1;
+    for (var rr = 1; rr <= 2; rr++) { g.beginPath(); g.arc(cx, cy, R * rr / 2, 0, 2 * Math.PI); g.stroke(); }
+    g.beginPath(); g.arc(cx, cy, R, 0, 2 * Math.PI); g.stroke();
+    // axes + labels
+    g.fillStyle = "#52525B"; g.font = "11px sans-serif"; g.textAlign = "center";
+    g.fillText("front", cx, cy - R - 6);
+    g.fillText("back", cx, cy + R + 14);
+    g.textAlign = "left"; g.fillText("right", cx + R + 4, cy + 3);
+    g.textAlign = "right"; g.fillText("left", cx - R - 4, cy + 3);
+    // head
+    g.fillStyle = "#1A1A1A"; g.beginPath(); g.arc(cx, cy, 13, 0, 2 * Math.PI); g.fill();
+    g.beginPath(); g.moveTo(cx, cy - 13); g.lineTo(cx - 5, cy - 19); g.lineTo(cx + 5, cy - 19); g.closePath(); g.fill();
+    // source position (front = -z = up)
+    var azr = params.az * Math.PI / 180;
+    var rad = Math.min(params.dist / 8, 1) * R;
+    var sx = cx + Math.sin(azr) * rad;
+    var sy = cy - Math.cos(azr) * rad;
+    // ray
+    g.strokeStyle = (mode === "HRTF") ? "#9333EA" : "#1D4ED8"; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(sx, sy); g.stroke();
+    // elevation tint: bigger + lighter dot when raised
+    var size = 7 + Math.max(0, params.el) / 10;
+    g.fillStyle = (mode === "HRTF") ? "#9333EA" : "#1D4ED8";
+    g.beginPath(); g.arc(sx, sy, size, 0, 2 * Math.PI); g.fill();
+    if (params.el > 4) { g.fillStyle = "#15803D"; g.beginPath(); g.arc(sx, sy, 3, 0, 2 * Math.PI); g.fill(); }
+  }
+
+  function updateReading() {
+    var side = params.az === 0 ? "front" : (params.az > 0 ? "right" : "left");
+    var fb = (Math.abs(params.az) > 90) ? ", behind" : "";
+    $("reading").innerHTML = "source at <b>" + params.az + "&deg;</b> (" + side + fb + "), elevation <b>" +
+      params.el + "&deg;</b>, <b>" + params.dist.toFixed(1) + " m</b>";
+  }
+
+  function refresh() { updatePanner(); drawRadar(); updateReading(); }
+
+  // ---------- orbit animation ----------
+  function orbitStep() {
+    if (!orbiting) return;
+    orbitAngle += 1.4;
+    if (orbitAngle > 180) orbitAngle -= 360;
+    params.az = Math.round(orbitAngle);
+    $("az").value = params.az;
+    $("az-v").textContent = azLabel(params.az);
+    refresh();
+    drawReq = requestAnimationFrame(orbitStep);
+  }
+
+  function azLabel(a) {
+    var side;
+    if (a === 0) side = "front";
+    else if (a === 180 || a === -180) side = "behind";
+    else if (a > 0 && a < 90) side = "front-right";
+    else if (a >= 90) side = "back-right";
+    else if (a < 0 && a > -90) side = "front-left";
+    else side = "back-left";
+    return (a > 0 ? "+" : "") + a + "° (" + side + ")";
+  }
+
+  // ---------- control binding ----------
+  function bindRange(id, key, fmt) {
+    var el = $(id), out = $(id + "-v");
+    el.addEventListener("input", function () {
+      params[key] = +el.value;
+      out.textContent = fmt(+el.value);
+      if (key === "rate" && playing) startBursts();
+      refresh();
+    });
+  }
+  bindRange("az", "az", azLabel);
+  bindRange("el", "el", function (v) { return (v > 0 ? "+" : "") + v + "°" + (v > 4 ? " (raised)" : (v < -4 ? " (lowered)" : " (ear level)")); });
+  bindRange("dist", "dist", function (v) { return v.toFixed(1) + " m"; });
+  bindRange("rate", "rate", function (v) { return v.toFixed(1) + " / s"; });
+
+  var modeBtns = document.querySelectorAll("button.mode");
+  for (var i = 0; i < modeBtns.length; i++) {
+    (function (b) { b.addEventListener("click", function () { setMode(b.getAttribute("data-mode")); }); })(modeBtns[i]);
+  }
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.9; Shell.connectMaster(ctx, master, {bypassLimiter:true});
+      noiseBuffer = buildNoise();
+      makePanner();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("orbit").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, pick a model, and move the source. Headphones for HRTF.");
+      refresh();
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true; startBursts();
+      $("play").innerHTML = "&#9632; Stop source";
+      setStatus("Playing. Drag azimuth/elevation/distance, or press Orbit. Compare HRTF against Stereo.");
+    } else {
+      playing = false; stopBursts();
+      $("play").innerHTML = "&#9658; Play source";
+      setStatus("Stopped.");
+    }
+  });
+
+  $("orbit").addEventListener("click", function () {
+    if (!ctx) return;
+    orbiting = !orbiting;
+    if (orbiting) {
+      orbitAngle = params.az;
+      $("orbit").innerHTML = "&#9632; Stop orbit";
+      drawReq = requestAnimationFrame(orbitStep);
+    } else {
+      $("orbit").innerHTML = "&#8635; Orbit around me";
+      if (drawReq) cancelAnimationFrame(drawReq);
+    }
+  });
+
+  // ---------- init ----------
+  setMode("HRTF");
+  drawRadar();
+  updateReading();
+})();
+</script>
+</body>
+</html>

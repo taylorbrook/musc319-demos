@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-fm (slug: fm)
+  An FM synthesis explorer for the Wednesday "FM synthesis" session (wk07-wed-fm).
+  It makes the session's core claim audible: two sine oscillators (a carrier and a
+  modulator) generate rich, complex spectra. Modulating the carrier's frequency adds
+  a cluster of new partials called SIDEBANDS; the modulation index controls brightness
+  and the carrier:modulator ratio controls harmonicity (pitched vs bell-like).
+
+  The audio graph is the canonical FM operator pair, built like demo-additive's
+  oscillator graph but with the modulator feeding the carrier's FREQUENCY:
+      modulator (osc) -> modIndex (gain) -> carrier.frequency
+      carrier (osc) -> master
+  A live spectrum (FFT) shows the sidebands appear and spread as the index rises, and
+  go harmonic or inharmonic as the ratio changes.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step. Hosted
+  on GitHub Pages and embedded into the Canvas page via an <iframe>. Audio NEVER starts
+  on load: the Start button calls audioContext.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: FM synthesis (carrier, modulator, sidebands)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .preset.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#scope { height: 150px; }
+  .ratio { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+  .ratio b { color: var(--accent); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>FM synthesis: two oscillators, many partials</h1>
+  <p class="instructions">
+    One <strong>carrier</strong> oscillator's frequency is modulated by a second, the <strong>modulator</strong>.
+    That modulation adds <strong>sidebands</strong> around the carrier. The <strong>modulation index</strong> controls
+    how bright (how many sidebands); the <strong>carrier:modulator ratio</strong> controls whether the result is
+    pitched (harmonic) or bell-like (inharmonic). Press Start, then Play, and move the two sliders.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the FM operators</legend>
+    <p class="ratio" id="ratio-read">carrier <b id="r-car">220</b> Hz, modulator <b id="r-mod">220</b> Hz, ratio <b id="r-ratio">1.00</b> : 1</p>
+    <div class="controls">
+      <div class="ctl">
+        <label for="carrier">Carrier frequency <span class="val" id="carrier-v">220 Hz</span></label>
+        <input id="carrier" type="range" min="55" max="880" step="1" value="220">
+      </div>
+      <div class="ctl">
+        <label for="ratio">C:M ratio <span class="val" id="ratio-v">1.00</span></label>
+        <input id="ratio" type="range" min="0.25" max="8" step="0.01" value="1">
+      </div>
+      <div class="ctl">
+        <label for="index">Modulation index (brightness) <span class="val" id="index-v">2.0</span></label>
+        <input id="index" type="range" min="0" max="20" step="0.1" value="2">
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <button id="p-bell" class="preset" type="button">Preset: bell (inharmonic)</button>
+      <button id="p-epiano" class="preset" type="button">Preset: electric piano</button>
+      <button id="p-bass" class="preset" type="button">Preset: FM bass</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT)</legend>
+    <canvas id="scope" width="780" height="150" aria-label="Live frequency spectrum showing the FM sidebands"></canvas>
+    <p class="note">
+      Raise the <strong>index</strong>: sidebands spread out from the carrier (brighter). Set an integer
+      <strong>ratio</strong> (1, 2, 3&hellip;) and the sidebands land on harmonics (pitched); set a non-integer ratio
+      and they fall between, giving the metallic, bell-like spectra FM is known for.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, carrier = null, modulator = null, modIndexGain = null, scopeBus = null;
+  var playing = false;
+  var params = { carrier: 220, ratio: 1, index: 2 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function modFreq() { return params.carrier * params.ratio; }
+  // FM: peak frequency deviation = index * modulator frequency
+  function deviation() { return params.index * modFreq(); }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0;
+
+    // carrier oscillator -> master
+    carrier = ctx.createOscillator(); carrier.type = "sine";
+    carrier.frequency.value = params.carrier;
+
+    // modulator -> modIndex gain -> carrier.frequency (the FM operator pair)
+    modulator = ctx.createOscillator(); modulator.type = "sine";
+    modulator.frequency.value = modFreq();
+    modIndexGain = ctx.createGain(); modIndexGain.gain.value = deviation();
+    modulator.connect(modIndexGain).connect(carrier.frequency);
+
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 1.0;
+    carrier.connect(scopeBus).connect(master);
+
+    Shell.connectMaster(ctx, master);
+    Shell.createScope(ctx, scopeBus, $("scope"), "fft");   // sidebands visible (D-07)
+
+    carrier.start(); modulator.start();
+  }
+
+  function applyParams() {
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    carrier.frequency.setTargetAtTime(params.carrier, t, 0.02);
+    modulator.frequency.setTargetAtTime(modFreq(), t, 0.02);
+    modIndexGain.gain.setTargetAtTime(deviation(), t, 0.02);
+    updateReadout();
+  }
+
+  function updateReadout() {
+    $("r-car").textContent = Math.round(params.carrier);
+    $("r-mod").textContent = Math.round(modFreq());
+    $("r-ratio").textContent = params.ratio.toFixed(2);
+  }
+
+  function setTone(on) {
+    if (!ctx || !master) return;
+    playing = on;
+    var t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.6 : 0.0, t + 0.05);
+    $("play").innerHTML = on ? "&#9632; Stop" : "&#9658; Play";
+  }
+
+  // ---- sliders ----
+  $("carrier").addEventListener("input", function () {
+    params.carrier = +this.value; $("carrier-v").textContent = Math.round(params.carrier) + " Hz"; applyParams();
+  });
+  $("ratio").addEventListener("input", function () {
+    params.ratio = +this.value; $("ratio-v").textContent = params.ratio.toFixed(2); applyParams();
+  });
+  $("index").addEventListener("input", function () {
+    params.index = +this.value; $("index-v").textContent = params.index.toFixed(1); applyParams();
+  });
+
+  // ---- presets ----
+  function setPreset(carrierHz, ratio, index) {
+    params.carrier = carrierHz; params.ratio = ratio; params.index = index;
+    $("carrier").value = String(carrierHz); $("carrier-v").textContent = carrierHz + " Hz";
+    $("ratio").value = String(ratio); $("ratio-v").textContent = ratio.toFixed(2);
+    $("index").value = String(index); $("index-v").textContent = index.toFixed(1);
+    applyParams();
+  }
+  var presetBtns = { "p-bell": [330, 1.41, 8], "p-epiano": [220, 1, 3], "p-bass": [110, 1, 5] };
+  Object.keys(presetBtns).forEach(function (id) {
+    $(id).addEventListener("click", function () {
+      Object.keys(presetBtns).forEach(function (k) { $(k).classList.remove("active"); });
+      this.classList.add("active");
+      var p = presetBtns[id]; setPreset(p[0], p[1], p[2]);
+      if (!playing) setTone(true);
+    });
+  });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then move the index and ratio.");
+      updateReadout();
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setTone(!playing);
+    setStatus(playing ? "Playing. Raise the index for sidebands; set the ratio for pitch or bell." : "Stopped.");
+  });
+
+  updateReadout();
+})();
+</script>
+</body>
+</html>

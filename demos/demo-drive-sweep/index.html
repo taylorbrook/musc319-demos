@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-drive-sweep (slug: drive-sweep)
+  Drive sweep on a sustained synth tone for the Monday "saturation & distortion"
+  session (wk05-mon-saturation). It replaces the page's audio-example placeholder
+  and makes the session's core claim audible AND visible: a clean sustained
+  sawtooth is pushed gradually from clean, through soft saturation that thickens
+  it, into hard clipping that makes it buzz and growl - the pitch stays fixed
+  while the harmonic content fills in from the bottom up.
+
+  Audio graph (built lazily inside the Start click):
+      sawtooth OscillatorNode (110 Hz default)
+        -> preGain   (the DRIVE, an AudioParam; gain = drive / DMAX)
+        -> WaveShaperNode (fixed tanh curve y = tanh(DMAX * x), oversample '4x')
+        -> postGain  (GAIN COMPENSATION so more drive is not simply louder)
+        -> scope tap -> master GainNode -> Shell.connectMaster (safety limiter)
+  A live spectrum (FFT, displayed 0-10 kHz) shows the harmonic series stack up
+  above the fixed fundamental as the drive rises.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe>.
+  Audio NEVER starts on load: the Start button calls audioContext.resume()
+  (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: drive sweep (saturation to hard clipping)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  canvas#scope { height: 150px; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Drive sweep: clean, saturated, hard-clipped</h1>
+  <p class="instructions">
+    A sustained <strong>sawtooth</strong> is pushed into a fixed <strong>tanh transfer curve</strong>.
+    Raise the <strong>drive</strong> and the tone goes from clean, through soft saturation that thickens it,
+    into hard clipping that makes it buzz and growl. The output level is <strong>gain-compensated</strong>,
+    so what you hear change is the harmonic content, not the loudness. Watch the spectrum:
+    harmonics fill in while the pitch stays fixed. Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the drive</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="drive">Drive <span class="val" id="drive-v">1.0x</span></label>
+        <input id="drive" type="range" min="1" max="40" step="0.1" value="1">
+      </div>
+      <div class="ctl">
+        <label for="freq">Oscillator frequency <span class="val" id="freq-v">110 Hz</span></label>
+        <input id="freq" type="range" min="55" max="440" step="1" value="110">
+      </div>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <button id="sweep" type="button">Sweep the drive (8 s)</button>
+    </div>
+    <p class="note">
+      Around 1x the sawtooth passes almost unchanged. The middle of the range rounds the
+      peaks (soft saturation, low-order harmonics, warmth). Near the top the waveform is
+      flattened against a ceiling (hard clipping, harsh high-order harmonics).
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT, 0-10 kHz)</legend>
+    <canvas id="scope" width="780" height="150" aria-label="Live frequency spectrum showing harmonics filling in as drive increases"></canvas>
+    <p class="note">
+      What to watch: the leftmost peak is the fixed <strong>fundamental</strong>; it never moves.
+      As the drive rises, <strong>harmonics stack up</strong> above it, stronger and higher as the
+      clipping hardens, while the fundamental stays put. That is added harmonic content
+      at a fixed pitch, the mechanism behind every saturator.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, osc = null, preGain = null, shaper = null, postGain = null;
+  var scopeBus = null, master = null;
+  var playing = false;
+  var sweeping = false, sweepRaf = 0;
+  var params = { drive: 1, freq: 110 };
+
+  // The shaper curve is y = tanh(DMAX * x) over x in [-1, 1], and the drive is
+  // applied as preGain = drive / DMAX. The shaped output at drive d is therefore
+  // exactly tanh(d * saw): d = 1 is nearly linear (clean), mid drive rounds the
+  // peaks (soft saturation), d = DMAX squares the wave off (hard clipping). The
+  // input never leaves the curve domain, so there is no edge-clamp discontinuity.
+  var DMAX = 40;
+  var SWEEP_MS = 8000;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // GAIN COMPENSATION formula: for a unit sawtooth through tanh(d * x), the
+  // output RMS is rms(d) = sqrt(1 - tanh(d)/d)  (closed form of the integral
+  // of tanh^2 over one ramp). postGain = LEVEL * rms(1) / rms(d) holds the
+  // output RMS roughly constant, so more drive means more harmonics, not
+  // simply more loudness.
+  var LEVEL = 0.9;
+  function rmsOf(d) { return Math.sqrt(1 - Math.tanh(d) / d); }
+  var RMS_REF = rmsOf(1);
+  function makeup(d) { return LEVEL * RMS_REF / rmsOf(d); }
+
+  function makeCurve() {
+    var n = 4096, curve = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      var x = (i / (n - 1)) * 2 - 1;
+      curve[i] = Math.tanh(DMAX * x);
+    }
+    return curve;
+  }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0;
+
+    osc = ctx.createOscillator(); osc.type = "sawtooth"; osc.frequency.value = params.freq;
+
+    preGain = ctx.createGain(); preGain.gain.value = params.drive / DMAX;
+
+    shaper = ctx.createWaveShaper();
+    shaper.curve = makeCurve();
+    shaper.oversample = "4x";        // tame the aliasing hard clipping generates
+
+    postGain = ctx.createGain(); postGain.gain.value = makeup(params.drive);
+
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 1.0;
+
+    osc.connect(preGain).connect(shaper).connect(postGain).connect(scopeBus).connect(master);
+
+    Shell.connectMaster(ctx, master);
+    Shell.createScope(ctx, scopeBus, $("scope"), "fft", {maxHz: 10000});  // harmonics visible, same 0-10 kHz axis as the AM/RM demo
+
+    osc.start();
+  }
+
+  function setDrive(d, fromSlider) {
+    params.drive = d;
+    if (!fromSlider) $("drive").value = d;
+    $("drive-v").textContent = d.toFixed(1) + "x";
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    preGain.gain.setTargetAtTime(d / DMAX, t, 0.03);
+    postGain.gain.setTargetAtTime(makeup(d), t, 0.03);
+  }
+
+  function setTone(on) {
+    if (!ctx || !master) return;
+    playing = on;
+    var t = ctx.currentTime;
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.7 : 0.0, t + 0.05);
+    $("play").innerHTML = on ? "&#9632; Stop" : "&#9658; Play";
+  }
+
+  // ---- automated sweep: ramp the drive from min to max over ~8 s ----
+  function stopSweep() {
+    sweeping = false;
+    if (sweepRaf) { cancelAnimationFrame(sweepRaf); sweepRaf = 0; }
+    $("sweep").textContent = "Sweep the drive (8 s)";
+  }
+
+  function startSweep() {
+    if (!ctx) return;
+    if (!playing) setTone(true);
+    sweeping = true;
+    $("sweep").textContent = "Cancel sweep";
+    var t0 = performance.now();
+    function step(now) {
+      if (!sweeping) return;
+      var p = Math.min(1, (now - t0) / SWEEP_MS);
+      setDrive(1 + p * (DMAX - 1), false);
+      if (p >= 1) {
+        stopSweep();
+        setStatus("Sweep complete: hard clipping. Drag the drive back down to hear it clean again.");
+        return;
+      }
+      sweepRaf = requestAnimationFrame(step);
+    }
+    sweepRaf = requestAnimationFrame(step);
+    setStatus("Sweeping the drive: clean, then soft saturation, then hard clipping. Watch the harmonics stack.");
+  }
+
+  // ---- controls ----
+  $("drive").addEventListener("input", function () {
+    if (sweeping) stopSweep();          // moving the slider cancels the sweep
+    setDrive(+this.value, true);
+  });
+  $("freq").addEventListener("input", function () {
+    params.freq = +this.value;
+    $("freq-v").textContent = Math.round(params.freq) + " Hz";
+    if (ctx) osc.frequency.setTargetAtTime(params.freq, ctx.currentTime, 0.02);
+  });
+  $("sweep").addEventListener("click", function () {
+    if (sweeping) { stopSweep(); setStatus("Sweep cancelled."); return; }
+    startSweep();
+  });
+
+  // ---- transport (audio never starts on load; context created in the click) ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then raise the drive or press Sweep.");
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (playing && sweeping) stopSweep();
+    setTone(!playing);
+    setStatus(playing ? "Playing a sustained sawtooth. Raise the drive and watch the spectrum." : "Stopped.");
+  });
+})();
+</script>
+</body>
+</html>

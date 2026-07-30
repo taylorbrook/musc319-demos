@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-automation (slug: automation)
+  An automation-lane explorer for the Monday "automation as composition" session.
+  A short note pattern loops on a sawtooth-through-a-filter voice, so the NOTES never
+  change. You draw an automation curve over the bar by dragging the lane's bars up and
+  down, choose which parameter the curve drives (filter cutoff, volume, or stereo pan),
+  and the demo schedules that parameter to follow your curve every loop. A playhead
+  sweeps the lane in time. The teaching point is "parameter-as-form": the same loop
+  becomes a rising, falling, swelling, or pulsing section purely from the shape of the
+  curve, with no new notes. Preset shapes (Rise, Fall, Swell, Pulse, Flat) seed a gesture
+  you can then reshape by hand.
+
+  Four-on-the-floor-free: this is about movement over time, not rhythm. Filter cutoff and
+  volume are scheduled with linearRampToValueAtTime through the breakpoints; the pan uses a
+  StereoPanner. Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into Canvas via an <iframe> (deploy + UBC iframe
+  allow-listing pending). Browsers suspend the AudioContext until a user gesture and a
+  cross-origin iframe cannot rely on autoplay, so audio NEVER starts on load: the Start
+  button calls audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Automation as composition</title>
+<style>
+  :root {
+    --accent: #1D4ED8;        /* technical-track accent */
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 800px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.shape.active, button.target.active { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .lane-wrap { margin-top: 6px; }
+  .lane {
+    position: relative; display: grid; grid-template-columns: repeat(24, 1fr);
+    gap: 2px; height: 150px; align-items: end;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px; cursor: ns-resize;
+  }
+  .bar { background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; opacity: 0.85; }
+  .bar.playing { background: var(--warm); opacity: 1; }
+  .laneaxis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin: 4px 2px 0; }
+  .reading { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  .reading b { color: var(--text); }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>Automation as composition: shape a section without new notes</h1>
+  <p class="instructions">
+    The loop keeps playing the <strong>same notes</strong>. You draw an <strong>automation curve</strong> across the bar
+    by dragging in the lane, pick which <strong>parameter</strong> it drives, and the sound follows your curve every loop.
+    A rising cutoff opens the section up; a swell breathes; a pulse makes the filter throb. This is form built from how a
+    parameter moves, not from which notes play. Press Start, then Play, then draw a curve or load a shape.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play loop</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: choose the parameter the curve drives</legend>
+    <div class="row">
+      <button class="target active" type="button" data-target="cutoff">Filter cutoff</button>
+      <button class="target" type="button" data-target="volume">Volume</button>
+      <button class="target" type="button" data-target="pan">Stereo pan</button>
+    </div>
+    <p class="status" id="target-desc">Filter cutoff: the curve opens and closes the low-pass filter, the classic filter-sweep gesture.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: draw the automation curve (drag in the lane), or load a shape</legend>
+    <div class="lane-wrap">
+      <div class="lane" id="lane" role="img" aria-label="Automation curve, current shape: Rise. Use the shape buttons below to change it."></div>
+      <div class="laneaxis"><span>start of loop</span><span>one bar of automation</span><span>end of loop</span></div>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <button class="shape active" type="button" data-shape="rise">Rise</button>
+      <button class="shape" type="button" data-shape="fall">Fall</button>
+      <button class="shape" type="button" data-shape="swell">Swell</button>
+      <button class="shape" type="button" data-shape="pulse">Pulse</button>
+      <button class="shape" type="button" data-shape="flat">Flat</button>
+    </div>
+    <p class="reading" id="reading"></p>
+  </fieldset>
+
+  <p class="note">
+    Try this: load <strong>Rise</strong> on <strong>Filter cutoff</strong> and listen to the loop open up over the bar, the
+    same gesture as the Week 4 filter sweep. Switch the parameter to <strong>Volume</strong> and load <strong>Swell</strong>
+    for a section that breathes, then to <strong>Pan</strong> for movement across the stereo field. The notes never changed.
+  </p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, voiceGain = null, filter = null, panNode = null;
+  var playing = false, scheduler = null, drawReq = null;
+  var STEPS = 24;
+  var LOOP = 4.0;                 // seconds per loop (the automation bar)
+  var curve = new Array(STEPS);   // values 0..1 across the bar
+  var target = "cutoff";
+  var nextLoopStart = 0;
+
+  // a short note pattern (semitone offsets from a root), looped; NOTES never change
+  var ROOT = 110;                 // A2
+  var PATTERN = [0, 7, 12, 7, 3, 10, 12, 15];
+  var noteSources = [];
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+  function midiRatio(semi) { return Math.pow(2, semi / 12); }
+
+  var TARGET_DESC = {
+    cutoff: "Filter cutoff: the curve opens and closes the low-pass filter, the classic filter-sweep gesture.",
+    volume: "Volume: the curve becomes a fade and swell shape, dynamics as form.",
+    pan: "Stereo pan: the curve moves the sound left to right across the field over the bar."
+  };
+
+  var SHAPES = {
+    rise: function (i) { return i / (STEPS - 1); },
+    fall: function (i) { return 1 - i / (STEPS - 1); },
+    swell: function (i) { return Math.sin(Math.PI * i / (STEPS - 1)); },
+    pulse: function (i) { return 0.5 + 0.5 * Math.sin(2 * Math.PI * 3 * i / STEPS - Math.PI / 2); },
+    flat: function () { return 0.6; }
+  };
+
+  // ---------- lane UI ----------
+  var bars = [];
+  function buildLane() {
+    var lane = $("lane");
+    for (var i = 0; i < STEPS; i++) {
+      var b = document.createElement("div");
+      b.className = "bar";
+      lane.appendChild(b);
+      bars.push(b);
+    }
+    paintLane();
+    var dragging = false;
+    function setFromEvent(e) {
+      var rect = lane.getBoundingClientRect();
+      var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      var x = clientX - rect.left, y = clientY - rect.top;
+      var idx = Math.floor((x / rect.width) * STEPS);
+      if (idx < 0) idx = 0; if (idx >= STEPS) idx = STEPS - 1;
+      var v = 1 - (y - 8) / (rect.height - 16);
+      v = Math.max(0, Math.min(1, v));
+      curve[idx] = v;
+      paintLane();
+      markCustom();
+    }
+    lane.addEventListener("mousedown", function (e) { dragging = true; setFromEvent(e); e.preventDefault(); });
+    window.addEventListener("mousemove", function (e) { if (dragging) setFromEvent(e); });
+    window.addEventListener("mouseup", function () { dragging = false; });
+    lane.addEventListener("touchstart", function (e) { dragging = true; setFromEvent(e); e.preventDefault(); }, { passive: false });
+    lane.addEventListener("touchmove", function (e) { if (dragging) { setFromEvent(e); e.preventDefault(); } }, { passive: false });
+    lane.addEventListener("touchend", function () { dragging = false; });
+  }
+
+  function paintLane() {
+    for (var i = 0; i < STEPS; i++) {
+      bars[i].style.height = Math.max(2, curve[i] * 100) + "%";
+    }
+    updateReading();
+  }
+
+  // The lane is pointer-only (no in-element key handler), so it is role="img"
+  // with a live aria-label naming the current curve; the preset buttons are the
+  // keyboard-operable path (RESEARCH Pattern 4 — never role=application without keys).
+  function setLaneLabel(text) {
+    $("lane").setAttribute("aria-label", "Automation curve, " + text + ". Use the shape buttons below to change it.");
+  }
+
+  function markCustom() {
+    var btns = document.querySelectorAll("button.shape");
+    for (var i = 0; i < btns.length; i++) btns[i].classList.remove("active");
+    setLaneLabel("hand-drawn custom shape");
+  }
+
+  function loadShape(name) {
+    var f = SHAPES[name]; if (!f) return;
+    for (var i = 0; i < STEPS; i++) curve[i] = Math.max(0, Math.min(1, f(i)));
+    paintLane();
+    var btns = document.querySelectorAll("button.shape");
+    for (var j = 0; j < btns.length; j++) btns[j].classList.toggle("active", btns[j].getAttribute("data-shape") === name);
+    setLaneLabel("current shape: " + name.charAt(0).toUpperCase() + name.slice(1));
+  }
+
+  function updateReading() {
+    $("reading").innerHTML = "Curve drives <b>" + target + "</b>. Drag in the lane to redraw it; the loop applies your curve on every pass.";
+  }
+
+  // ---------- audio graph ----------
+  function buildVoice() {
+    filter = ctx.createBiquadFilter(); filter.type = "lowpass"; filter.frequency.value = 800; filter.Q.value = 6;
+    voiceGain = ctx.createGain(); voiceGain.gain.value = 0.5;
+    panNode = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    var tail = filter;
+    tail.connect(voiceGain);
+    if (panNode) { voiceGain.connect(panNode); panNode.connect(master); }
+    else { voiceGain.connect(master); }
+  }
+
+  function scheduleNotes(loopStart) {
+    var step = LOOP / PATTERN.length;
+    for (var i = 0; i < PATTERN.length; i++) {
+      var when = loopStart + i * step;
+      var o = ctx.createOscillator(); o.type = "sawtooth";
+      o.frequency.value = ROOT * midiRatio(PATTERN[i]);
+      var g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.exponentialRampToValueAtTime(0.6, when + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.18, when + step * 0.6);
+      g.gain.exponentialRampToValueAtTime(0.0008, when + step * 0.98);
+      o.connect(g).connect(filter);
+      o.start(when); o.stop(when + step);
+    }
+  }
+
+  // map the 0..1 curve to the chosen parameter and schedule it across the loop
+  function scheduleAutomation(loopStart) {
+    var step = LOOP / STEPS;
+    var p;
+    if (target === "cutoff") p = filter.frequency;
+    else if (target === "volume") p = voiceGain.gain;
+    else p = panNode ? panNode.pan : null;
+    if (!p) return;
+    p.cancelScheduledValues(loopStart);
+    for (var i = 0; i < STEPS; i++) {
+      var when = loopStart + i * step;
+      var v = curve[i];
+      var val;
+      if (target === "cutoff") val = 180 * Math.pow(7000 / 180, v);   // 180 Hz .. 7 kHz, log
+      else if (target === "volume") val = 0.04 + v * 0.85;
+      else val = v * 2 - 1;                                            // -1 .. +1
+      if (i === 0) p.setValueAtTime(val, when);
+      else p.linearRampToValueAtTime(val, when);
+    }
+  }
+
+  function resetIdleParams() {
+    // when a parameter is NOT the automation target, hold it at a neutral value
+    if (target !== "cutoff") filter.frequency.setValueAtTime(2400, ctx.currentTime + 0.01);
+    if (target !== "volume") voiceGain.gain.setValueAtTime(0.5, ctx.currentTime + 0.01);
+    if (target !== "pan" && panNode) panNode.pan.setValueAtTime(0, ctx.currentTime + 0.01);
+  }
+
+  // ---------- loop scheduler ----------
+  function tick() {
+    if (!playing) return;
+    var ahead = ctx.currentTime + 0.2;
+    while (nextLoopStart < ahead) {
+      scheduleNotes(nextLoopStart);
+      scheduleAutomation(nextLoopStart);
+      nextLoopStart += LOOP;
+    }
+  }
+
+  function drawPlayhead() {
+    if (!playing) return;
+    var pos = ((ctx.currentTime % LOOP) / LOOP);
+    var idx = Math.floor(pos * STEPS);
+    for (var i = 0; i < STEPS; i++) bars[i].classList.toggle("playing", i === idx);
+    drawReq = requestAnimationFrame(drawPlayhead);
+  }
+
+  // ---------- controls ----------
+  var targetBtns = document.querySelectorAll("button.target");
+  for (var i = 0; i < targetBtns.length; i++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        target = b.getAttribute("data-target");
+        for (var j = 0; j < targetBtns.length; j++) targetBtns[j].classList.toggle("active", targetBtns[j] === b);
+        $("target-desc").textContent = TARGET_DESC[target];
+        updateReading();
+        if (playing) { resetIdleParams(); nextLoopStart = ctx.currentTime + 0.05; }
+      });
+    })(targetBtns[i]);
+  }
+
+  var shapeBtns = document.querySelectorAll("button.shape");
+  for (var k = 0; k < shapeBtns.length; k++) {
+    (function (b) { b.addEventListener("click", function () { loadShape(b.getAttribute("data-shape")); }); })(shapeBtns[k]);
+  }
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.85; Shell.connectMaster(ctx, master);
+      buildVoice();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then draw a curve or load a shape. Switch the parameter to compare.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true;
+      resetIdleParams();
+      nextLoopStart = ctx.currentTime + 0.08;
+      scheduler = setInterval(tick, 25);
+      tick();
+      requestAnimationFrame(drawPlayhead);
+      $("play").innerHTML = "&#9632; Stop loop";
+      setStatus("Playing the same loop. Reshape the curve and hear the section change with no new notes.");
+    } else {
+      playing = false;
+      clearInterval(scheduler); scheduler = null;
+      if (drawReq) cancelAnimationFrame(drawReq);
+      for (var i = 0; i < STEPS; i++) bars[i].classList.remove("playing");
+      $("play").innerHTML = "&#9658; Play loop";
+      setStatus("Stopped.");
+    }
+  });
+
+  // ---------- init ----------
+  buildLane();
+  loadShape("rise");
+})();
+</script>
+</body>
+</html>

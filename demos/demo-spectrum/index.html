@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-spectrum (slug: spectrum)
+  A spectrum / FFT analyzer for the Monday "signal flow & routing" session
+  (wk02-mon-signal-flow). It is the introductory "see the signal as spectrum" wire
+  (D-02): before any processing, make the signal path legible by SEEING the energy
+  across the spectrum, the same view every later EQ, compression, and mastering move
+  reads.
+
+  The player drives a source (sine / sawtooth / square / white noise / pink-ish noise)
+  at a chosen pitch and reads its live FFT. A sine shows one peak; a sawtooth shows a
+  harmonic stack; noise fills the band. This is the spectral literacy the rest of the
+  course's metering depends on.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step. Hosted
+  on GitHub Pages and embedded into the Canvas page via an <iframe>. Audio NEVER starts
+  on load: the Start button calls audioContext.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Spectrum analyzer (see the signal as spectrum)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .src-btn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#scope { height: 170px; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Spectrum analyzer: see the signal as spectrum</h1>
+  <p class="instructions">
+    Before any processing, make the signal legible by <strong>seeing</strong> it. Drive a source and read its
+    live <strong>spectrum</strong> (FFT): a <strong>sine</strong> is one peak, a <strong>sawtooth</strong> is a stack of harmonics,
+    <strong>noise</strong> fills the whole band. This is the view every later EQ, compressor, and meter reads.
+    Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the source</legend>
+    <div class="row" style="margin-bottom:14px;">
+      <button id="s-sine" class="src-btn" type="button">Sine</button>
+      <button id="s-sawtooth" class="src-btn" type="button">Sawtooth</button>
+      <button id="s-square" class="src-btn" type="button">Square</button>
+      <button id="s-noise" class="src-btn" type="button">White noise</button>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label for="pitch">Pitch <span class="val" id="pitch-v">220 Hz</span></label>
+        <input id="pitch" type="range" min="55" max="2000" step="1" value="220">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The spectrum (live FFT)</legend>
+    <canvas id="scope" width="780" height="170" aria-label="Live frequency spectrum of the source"></canvas>
+    <p class="note">
+      The horizontal axis is frequency (low to high), the vertical axis is energy. Switch sources and move
+      the pitch to read how each timbre distributes its energy across the spectrum.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, scopeBus = null, voice = null, noiseBuf = null;
+  var playing = false;
+  var params = { source: "sine", pitch: 220 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.0;
+    scopeBus = ctx.createGain(); scopeBus.gain.value = 1.0;
+    scopeBus.connect(master);
+    Shell.connectMaster(ctx, master);
+    Shell.createScope(ctx, scopeBus, $("scope"), "fft");     // FFT view (D-02, D-07)
+    noiseBuf = buildNoise();
+  }
+
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 0.5);
+    var buf = ctx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function startVoice() {
+    stopVoice();
+    if (params.source === "noise") {
+      var n = ctx.createBufferSource(); n.buffer = noiseBuf; n.loop = true;
+      var g = ctx.createGain(); g.gain.value = 0.5;
+      n.connect(g).connect(scopeBus); n.start();
+      voice = n;
+    } else {
+      var o = ctx.createOscillator(); o.type = params.source; o.frequency.value = params.pitch;
+      var og = ctx.createGain(); og.gain.value = 0.5;
+      o.connect(og).connect(scopeBus); o.start();
+      voice = o;
+    }
+  }
+  function stopVoice() { if (voice) { try { voice.stop(); } catch (e) {} voice = null; } }
+
+  function setTone(on) {
+    if (!ctx || !master) return;
+    playing = on;
+    var t = ctx.currentTime;
+    if (on) startVoice();
+    master.gain.cancelScheduledValues(t);
+    master.gain.linearRampToValueAtTime(on ? 0.7 : 0.0, t + 0.05);
+    if (!on) setTimeout(stopVoice, 80);
+    $("play").innerHTML = on ? "&#9632; Stop" : "&#9658; Play";
+  }
+
+  // ---- source buttons ----
+  var srcBtns = { sine: "s-sine", sawtooth: "s-sawtooth", square: "s-square", noise: "s-noise" };
+  function selectSource(s) {
+    params.source = s;
+    Object.keys(srcBtns).forEach(function (k) { $(srcBtns[k]).classList.toggle("active", k === s); });
+    $("pitch").disabled = (s === "noise");
+    if (playing) startVoice();
+  }
+  Object.keys(srcBtns).forEach(function (k) {
+    $(srcBtns[k]).addEventListener("click", function () { selectSource(k); });
+  });
+
+  // ---- pitch ----
+  $("pitch").addEventListener("input", function () {
+    params.pitch = +this.value; $("pitch-v").textContent = Math.round(params.pitch) + " Hz";
+    if (voice && voice.frequency) voice.frequency.setTargetAtTime(params.pitch, ctx.currentTime, 0.02);
+  });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); selectSource("sine"); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then switch sources and read the spectrum.");
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setTone(!playing);
+    setStatus(playing ? "Playing. Switch sources and move the pitch; read the spectrum." : "Stopped.");
+  });
+
+  $("s-sine").classList.add("active");
+})();
+</script>
+</body>
+</html>

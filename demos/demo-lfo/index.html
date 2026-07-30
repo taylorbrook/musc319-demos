@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-lfo (slug: lfo)
+  A one-LFO-many-destinations explorer for the Monday "automation / modulation"
+  session (wk11-mon-automation). A single steady tone plays; a single low-frequency
+  oscillator (rate, depth, waveform) is routed to exactly ONE destination at a time:
+  pitch (vibrato), filter cutoff (filter sweep), amplitude (tremolo), or stereo pan
+  (auto-pan). The teaching point is that these named effects are the SAME source
+  pointed at different parameters, not four separate tools. Switch the destination
+  with the rate and depth held constant and the character changes completely while
+  the LFO itself does not.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). The LFO is an
+  OscillatorNode running below ~20 Hz through a "depth" gain node; that control
+  signal is connected to the target AudioParam (osc.detune, filter.frequency,
+  voiceGain.gain, or panner.pan) so the parameter follows the LFO automatically.
+  Only one destination is connected at a time; switching disconnects the old
+  param, resets it to a neutral value, and connects the new one. A small canvas
+  draws the LFO shape with a moving playhead so you can see rate, depth, and
+  waveform at a glance. No synthesis library, no build step. Hosted on GitHub
+  Pages and embedded into Canvas via an <iframe>. Browsers suspend the
+  AudioContext until a user gesture and a cross-origin iframe cannot rely on
+  autoplay, so audio NEVER starts on load: the Start button calls
+  audioContext.resume() from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: One LFO, many destinations</title>
+<style>
+  :root {
+    --accent: #1D4ED8;        /* technical-track accent */
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 800px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.wave.active, button.dest.active { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .slider { display: flex; flex-direction: column; gap: 4px; min-width: 220px; flex: 1; }
+  .slider label { font-size: 13px; color: var(--muted); }
+  .slider label b { color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  input[type="range"]:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .scope-wrap { margin-top: 6px; }
+  canvas#scope {
+    width: 100%; height: 140px; display: block;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .reading { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  .reading b { color: var(--text); }
+  .dest-desc { font-size: 14px; color: var(--text); margin: 10px 0 0; min-height: 1.4em; }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>One LFO, many destinations</h1>
+  <p class="instructions">
+    A <strong>low-frequency oscillator</strong> (LFO) is one slow oscillator, well below hearing range, whose output you use as
+    a <strong>control signal</strong> rather than a sound. Set its <strong>rate</strong>, <strong>depth</strong>, and
+    <strong>shape</strong> once, then choose which parameter it drives. Pointed at pitch it is vibrato; at the filter it is a
+    sweep; at volume it is tremolo; at pan it is auto-pan. Same source, four names. Press Start, then switch the destination and
+    listen: the LFO never changes, only where it is routed.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play tone</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: shape the LFO (these stay fixed as you switch destination)</legend>
+    <div class="row">
+      <div class="slider">
+        <label for="rate">Rate: <b id="rate-val">5.0 Hz</b></label>
+        <input type="range" id="rate" min="0.1" max="18" step="0.1" value="5">
+      </div>
+      <div class="slider">
+        <label for="depth">Depth: <b id="depth-val">40%</b></label>
+        <input type="range" id="depth" min="0" max="100" step="1" value="40">
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px;">
+      <span style="font-size:13px;color:var(--muted);">Shape:</span>
+      <button class="wave active" type="button" data-wave="sine">Sine</button>
+      <button class="wave" type="button" data-wave="triangle">Triangle</button>
+      <button class="wave" type="button" data-wave="square">Square</button>
+      <button class="wave" type="button" data-wave="sawtooth">Ramp</button>
+    </div>
+    <div class="scope-wrap">
+      <canvas id="scope" width="760" height="140" role="img"
+        aria-label="LFO shape: sine, rate 5.0 hertz, depth 40 percent."></canvas>
+    </div>
+    <p class="reading" id="reading">LFO: <b>sine</b>, <b>5.0 Hz</b>, depth <b>40%</b>.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: route the LFO to one destination</legend>
+    <div class="row">
+      <button class="dest active" type="button" data-dest="pitch">Pitch &rarr; vibrato</button>
+      <button class="dest" type="button" data-dest="cutoff">Filter cutoff &rarr; sweep</button>
+      <button class="dest" type="button" data-dest="amp">Amplitude &rarr; tremolo</button>
+      <button class="dest" type="button" data-dest="pan">Pan &rarr; auto-pan</button>
+    </div>
+    <p class="dest-desc" id="dest-desc">Pitch: the LFO pushes the tone sharp and flat around its center, which is vibrato.</p>
+  </fieldset>
+
+  <p class="note">
+    Try this: leave the rate near 5 Hz and depth near 40%, then step through the four destinations. The rate you hear as a
+    "wobble speed" is identical every time; only the parameter it moves is different. Then raise the depth and slow the rate to
+    hear each effect exaggerated.
+  </p>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null;
+  var osc1 = null, osc2 = null, filter = null, voiceGain = null, panNode = null;
+  var lfo = null, lfoDepth = null;
+  var playing = false, drawReq = null;
+
+  // fixed neutral values held by a parameter when it is NOT the LFO destination
+  var NEUTRAL = { detune: 0, cutoff: 1600, amp: 0.34, pan: 0 };
+  // base value the parameter sits at while it IS the destination (LFO swings around it)
+  var BASE = { pitch: 0, cutoff: 1150, amp: 0.34, pan: 0 };
+  // full-depth swing amplitude of the LFO for each destination, in that param's units
+  var SWING = { pitch: 70 /* cents */, cutoff: 950 /* Hz */, amp: 0.34, pan: 1.0 };
+
+  var dest = "pitch";
+  var rateHz = 5.0;
+  var depthFrac = 0.40;
+  var wave = "sine";
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  var DEST_DESC = {
+    pitch:  "Pitch: the LFO pushes the tone sharp and flat around its center, which is vibrato.",
+    cutoff: "Filter cutoff: the LFO opens and closes the low-pass filter, the sweep gesture from Week 4.",
+    amp:    "Amplitude: the LFO raises and lowers the level, which is tremolo, the wobble from Week 5 at a sub-audio rate.",
+    pan:    "Pan: the LFO moves the tone left and right across the stereo field, which is auto-pan."
+  };
+
+  // human-readable depth for the current destination (used in the readout)
+  function depthLabel() {
+    if (dest === "pitch")  return "±" + Math.round(SWING.pitch * depthFrac) + " cents";
+    if (dest === "cutoff") return "±" + Math.round(SWING.cutoff * depthFrac) + " Hz";
+    if (dest === "amp")    return Math.round(depthFrac * 100) + "% level swing";
+    return "±" + (SWING.pan * depthFrac).toFixed(2) + " pan";
+  }
+
+  // ---------- audio graph ----------
+  function buildVoice() {
+    osc1 = ctx.createOscillator(); osc1.type = "sawtooth"; osc1.frequency.value = 165; // E3-ish drone
+    osc2 = ctx.createOscillator(); osc2.type = "sawtooth"; osc2.frequency.value = 165; osc2.detune.value = 8;
+    filter = ctx.createBiquadFilter(); filter.type = "lowpass"; filter.frequency.value = NEUTRAL.cutoff; filter.Q.value = 4;
+    voiceGain = ctx.createGain(); voiceGain.gain.value = NEUTRAL.amp;
+    panNode = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+
+    osc1.connect(filter); osc2.connect(filter);
+    filter.connect(voiceGain);
+    if (panNode) { voiceGain.connect(panNode); panNode.connect(master); }
+    else { voiceGain.connect(master); }
+
+    lfo = ctx.createOscillator(); lfo.type = wave; lfo.frequency.value = rateHz;
+    lfoDepth = ctx.createGain(); lfoDepth.gain.value = 0;
+    lfo.connect(lfoDepth);
+
+    osc1.start(); osc2.start(); lfo.start();
+    applyRouting(dest);
+  }
+
+  // connect the single LFO->depth signal to exactly one destination param,
+  // reset every other param to its neutral value, and scale the depth gain to
+  // that destination's units.
+  function applyRouting(target) {
+    if (!lfoDepth) return;
+    var t = ctx.currentTime;
+    try { lfoDepth.disconnect(); } catch (e) {}
+
+    // reset all params to neutral first
+    osc1.detune.setValueAtTime(NEUTRAL.detune, t);
+    osc2.detune.setValueAtTime(NEUTRAL.detune, t);
+    filter.frequency.setValueAtTime(NEUTRAL.cutoff, t);
+    voiceGain.gain.setValueAtTime(NEUTRAL.amp, t);
+    if (panNode) panNode.pan.setValueAtTime(NEUTRAL.pan, t);
+
+    if (target === "pitch") {
+      osc1.detune.setValueAtTime(BASE.pitch, t);
+      osc2.detune.setValueAtTime(BASE.pitch, t);
+      lfoDepth.connect(osc1.detune); lfoDepth.connect(osc2.detune);
+      lfoDepth.gain.setValueAtTime(SWING.pitch * depthFrac, t);
+    } else if (target === "cutoff") {
+      filter.frequency.setValueAtTime(BASE.cutoff, t);
+      lfoDepth.connect(filter.frequency);
+      lfoDepth.gain.setValueAtTime(SWING.cutoff * depthFrac, t);
+    } else if (target === "amp") {
+      voiceGain.gain.setValueAtTime(BASE.amp, t);
+      lfoDepth.connect(voiceGain.gain);
+      lfoDepth.gain.setValueAtTime(SWING.amp * depthFrac, t);
+    } else if (target === "pan" && panNode) {
+      panNode.pan.setValueAtTime(BASE.pan, t);
+      lfoDepth.connect(panNode.pan);
+      lfoDepth.gain.setValueAtTime(SWING.pan * depthFrac, t);
+    }
+  }
+
+  function refreshDepthGain() {
+    if (!lfoDepth) return;
+    var scale = (dest === "pitch") ? SWING.pitch
+              : (dest === "cutoff") ? SWING.cutoff
+              : (dest === "amp") ? SWING.amp : SWING.pan;
+    lfoDepth.gain.setTargetAtTime(scale * depthFrac, ctx.currentTime, 0.02);
+  }
+
+  // ---------- scope (JS-drawn LFO shape + moving playhead) ----------
+  var CYCLES = 2;
+  function waveY(phase) {
+    // phase in 0..1 -> value in -1..1 for the selected shape
+    if (wave === "sine")     return Math.sin(2 * Math.PI * phase);
+    if (wave === "triangle") return 2 * Math.abs(2 * (phase - Math.floor(phase + 0.5))) - 1;
+    if (wave === "square")   return (phase % 1) < 0.5 ? 1 : -1;
+    // sawtooth / ramp
+    var f = phase - Math.floor(phase);
+    return 2 * f - 1;
+  }
+
+  function drawScope() {
+    var cv = $("scope"); if (!cv) return;
+    var g = cv.getContext("2d");
+    var W = cv.width, H = cv.height, mid = H / 2, amp = (H / 2 - 14) * Math.max(0.06, depthFrac);
+    g.clearRect(0, 0, W, H);
+    // zero line
+    g.strokeStyle = "#D4D4D8"; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, mid); g.lineTo(W, mid); g.stroke();
+    // waveform (CYCLES cycles across the width)
+    g.strokeStyle = "#1D4ED8"; g.lineWidth = 2.5; g.beginPath();
+    for (var x = 0; x <= W; x++) {
+      var ph = (x / W) * CYCLES;
+      var y = mid - waveY(ph) * amp;
+      if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+    // moving playhead dot, driven by audio clock when playing
+    if (playing && ctx) {
+      var tphase = (ctx.currentTime * rateHz) % CYCLES;
+      var px = (tphase / CYCLES) * W;
+      var py = mid - waveY(tphase) * amp;
+      g.fillStyle = "#C2410C";
+      g.beginPath(); g.arc(px, py, 6, 0, 2 * Math.PI); g.fill();
+    }
+    drawReq = requestAnimationFrame(drawScope);
+  }
+
+  function updateReadout() {
+    var pretty = wave === "sawtooth" ? "ramp" : wave;
+    $("reading").innerHTML = "LFO: <b>" + pretty + "</b>, <b>" + rateHz.toFixed(1) + " Hz</b>, depth <b>"
+      + Math.round(depthFrac * 100) + "%</b> → " + depthLabel() + ".";
+    $("scope").setAttribute("aria-label",
+      "LFO shape: " + pretty + ", rate " + rateHz.toFixed(1) + " hertz, depth " + Math.round(depthFrac * 100) + " percent.");
+  }
+
+  // ---------- controls ----------
+  $("rate").addEventListener("input", function () {
+    rateHz = parseFloat(this.value);
+    $("rate-val").textContent = rateHz.toFixed(1) + " Hz";
+    if (lfo) lfo.frequency.setTargetAtTime(rateHz, ctx.currentTime, 0.02);
+    updateReadout();
+  });
+  $("depth").addEventListener("input", function () {
+    depthFrac = parseInt(this.value, 10) / 100;
+    $("depth-val").textContent = Math.round(depthFrac * 100) + "%";
+    refreshDepthGain();
+    updateReadout();
+  });
+
+  var waveBtns = document.querySelectorAll("button.wave");
+  for (var i = 0; i < waveBtns.length; i++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        wave = b.getAttribute("data-wave");
+        for (var j = 0; j < waveBtns.length; j++) waveBtns[j].classList.toggle("active", waveBtns[j] === b);
+        if (lfo) lfo.type = wave;
+        updateReadout();
+      });
+    })(waveBtns[i]);
+  }
+
+  var destBtns = document.querySelectorAll("button.dest");
+  for (var k = 0; k < destBtns.length; k++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        dest = b.getAttribute("data-dest");
+        for (var j = 0; j < destBtns.length; j++) destBtns[j].classList.toggle("active", destBtns[j] === b);
+        $("dest-desc").textContent = DEST_DESC[dest];
+        if (ctx) applyRouting(dest);
+        updateReadout();
+      });
+    })(destBtns[k]);
+  }
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.0001; Shell.connectMaster(ctx, master);
+      buildVoice();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then route the LFO and switch destinations to compare.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true;
+      master.gain.setTargetAtTime(0.7, ctx.currentTime, 0.03);
+      $("play").innerHTML = "&#9632; Stop tone";
+      setStatus("Playing a steady tone. Switch the destination and hear the same LFO become vibrato, sweep, tremolo, or auto-pan.");
+    } else {
+      playing = false;
+      master.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.03);
+      $("play").innerHTML = "&#9658; Play tone";
+      setStatus("Muted. Press Play to sound the tone again.");
+    }
+  });
+
+  // ---------- init ----------
+  updateReadout();
+  drawScope();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-delay-sweep (slug: delay-sweep)
+  One delay control, three outcomes, for the Wednesday delay and reverb session
+  (wk04-wed-delay-reverb). A single delay-time slider sweeps the source through
+  the three perceptual regions the page's delay prose names as the time grows:
+  stereo width (a very short delay read as inter-aural time difference, the
+  precedence effect), comb coloration and flanging (a short delay whose
+  dry-plus-delayed sum carves regularly spaced notches), and discrete echo (a
+  long delay heard as a separate repeat). A live FFT scope shows the comb notches
+  sliding as the delay time changes, matching the page's comb-filter figure, and
+  a feedback control regenerates repeats for the echo region.
+
+  Source: the DEFAULT is a plucky sawtooth melody loop (C-D-E-F-G then three
+  rests, repeating). Its fast note attacks are the impulses that make the delay
+  audible, and the trailing rests leave clean air for the echoes (and feedback
+  repeats) to ring out; the sawtooth's rich harmonics still colour audibly through
+  the comb region. A broadband white-noise source is retained behind a toggle
+  because steady noise gives the cleanest view of the sliding comb notches on the
+  FFT scope (an echo of steady noise, though, is inaudible as a discrete repeat,
+  which is why noise is no longer the default).
+
+  Web Audio constraint (stated once, honoured below): a DelayNode that sits INSIDE
+  a feedback cycle is clamped by the browser to a minimum delay of one render
+  quantum (128 samples, about 2.7 to 2.9 ms at 44.1 to 48 kHz). So the primary wet
+  copy is a FEEDFORWARD tap (source -> delay -> wet, no cycle) whose delay time can
+  go below a millisecond, keeping the sub-ms width and comb regions genuine. A
+  SEPARATE feedback delay carries the regeneration loop (delay -> feedback -> delay)
+  whose repeats only matter from a few milliseconds upward, i.e. the comb-to-echo
+  regions where multiple repeats are the point.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext, D-08). No build step,
+  no synthesis library. Hosted on GitHub Pages and embedded into the Canvas page via
+  an <iframe>. Audio NEVER starts on load: the Start button calls audioContext
+  .resume() through Shell.gate, and the master terminates through Shell.connectMaster.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Delay sweep (one delay control, three outcomes)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .zone { display: inline-block; font-weight: 600; color: #FFFFFF; background: var(--accent); border-radius: 6px; padding: 2px 10px; font-size: 14px; }
+  .zone.width { background: var(--good); }
+  .zone.comb { background: var(--accent); }
+  .zone.echo { background: var(--warm); }
+  .chain { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+  .chain b { color: var(--accent); }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Delay sweep: one control, three outcomes</h1>
+  <p class="instructions">
+    Sweep the single <strong>delay-time</strong> slider and listen to one delay control move through the three
+    outcomes the page names: <strong>stereo width</strong> at the shortest times, <strong>comb coloration and
+    flanging</strong> a little longer, then a <strong>discrete echo</strong> once the repeat separates. The scope
+    shows the comb notches sliding with the delay time; raise <strong>feedback</strong> to regenerate repeats.
+    Press Start, then move the sliders. The default source is a <strong>plucky sawtooth melody</strong>
+    (C-D-E-F-G, then rests) whose note attacks let you hear each echo; switch the source to
+    <strong>broadband noise</strong> for the cleanest view of the comb notches.
+  </p>
+  <p class="chain">source (<b>sawtooth melody</b> / noise) &#8594; <b>dry</b> + <b>feedforward delay</b> (comb, width) + <b>feedback delay</b> (regenerating echoes) &#8594; <b>mix</b> &#8594; scope &#8594; out</p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play source</button>
+    </div>
+    <div class="row" role="radiogroup" aria-label="Source" style="margin-top:10px;align-items:center;">
+      <span class="note" style="display:inline;margin-right:8px;">Source:</span>
+      <label style="margin-right:16px;font-size:14px;"><input type="radio" name="source" value="melody" checked> Melody (sawtooth loop)</label>
+      <label style="font-size:14px;"><input type="radio" name="source" value="noise"> Broadband noise</label>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the delay time (the one control that does three things)</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="time">Delay time <span class="val" id="time-v">5.0 ms</span></label>
+        <!-- Log-mapped slider: 0.1 ms at 0 up to 1000 ms at 1000, so the small-ms
+             width and comb region gets real resolution. -->
+        <input id="time" type="range" min="0" max="1000" step="1" value="425" aria-describedby="zone-line">
+      </div>
+    </div>
+    <p id="zone-line" style="margin:12px 0 0;" aria-live="polite">Current region: <span class="zone comb" id="zone">Comb coloration / flanging</span> <span class="note" id="zone-note" style="display:inline;">the dry and delayed copies sum into a comb of evenly spaced notches.</span></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: feedback and mix</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="feedback">Feedback (regenerates repeats) <span class="val" id="feedback-v">0.30</span></label>
+        <input id="feedback" type="range" min="0" max="0.9" step="0.01" value="0.3">
+      </div>
+      <div class="ctl">
+        <label for="mix">Wet / dry mix <span class="val" id="mix-v">50% wet</span></label>
+        <input id="mix" type="range" min="0" max="1" step="0.01" value="0.5">
+      </div>
+    </div>
+    <p class="note">
+      With the mix near the middle the dry and wet copies are equal, so the comb notches are deepest. Feedback
+      routes the delay output back into the delay input to add successive repeats, from a single slap up toward a
+      runaway wash as it approaches its top.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>The comb notches (live FFT scope)</legend>
+    <canvas id="scope" width="780" height="120" aria-label="Live spectrum of the delayed mix. As the delay time changes, the regularly spaced comb notches slide: a shorter delay spaces the notches more widely, a longer delay packs them closer."></canvas>
+    <p class="note">
+      A shorter delay spaces the comb notches more widely; a longer delay packs them closer. Sweeping the delay
+      time slides the whole comb, which is exactly the swooshing motion of a flanger. Switch the source to
+      <strong>broadband noise</strong> for the cleanest read of the notches; the melody's harmonics show the same
+      comb carved onto discrete pitch lines.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, mix = null;
+  var srcGain = null, noiseSrc = null, noiseGain = null;
+  var sawOsc = null, melodyEnv = null, sourceMode = "melody";
+  var dry = null, delayFF = null, wet = null, wetPan = null;
+  var fbDelay = null, fb = null, fbWet = null, fbPan = null;
+  var playing = false;
+  var params = { timeMs: 5, feedback: 0.30, mix: 0.5 };
+
+  // ---- melodic sawtooth loop: C-D-E-F-G then three rests, repeating ----
+  // The fast note attacks are the impulses that make the delay audible; the
+  // three trailing rests leave clean air for the echoes and feedback to ring.
+  var NOTES = { C: 261.63, D: 293.66, E: 329.63, F: 349.23, G: 392.00 };
+  var SEQ = [NOTES.C, NOTES.D, NOTES.E, NOTES.F, NOTES.G, null, null, null];
+  var STEP_DUR = 0.26;   // seconds per step; 8 steps ~ 2.1 s loop
+  var NOTE_LEN = 0.17;   // plucky note length; the rest of the step is silence
+  var NOTE_PEAK = 0.5;
+  var LOOKAHEAD = 0.12, TICK_MS = 25;                 // lookahead scheduler
+  var schedTimer = null, nextNoteTime = 0, seqStep = 0;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---- log map: slider 0..1000 -> 0.1 ms .. 1000 ms ----
+  function msForPos(pos) { return 0.1 * Math.pow(10000, pos / 1000); }
+
+  // ---- perceptual region from the delay time (ms) ----
+  // < 1.5 ms   : the ear fuses the copy with the original and reads the short
+  //              inter-aural gap as stereo width (precedence / Haas effect).
+  // 1.5..40 ms : the sum of dry + delayed copy carves audible comb notches
+  //              (the flanger region); still fused, heard as coloration.
+  // >= 40 ms   : past the ~30-40 ms fusion threshold the repeat splits off as a
+  //              discrete echo.
+  function zoneFor(ms) {
+    if (ms < 1.5) return { key: "width", label: "Stereo width", note: "a very short delay is read as an inter-aural time difference, so the copy widens the source rather than echoing it (the precedence effect)." };
+    if (ms < 40) return { key: "comb", label: "Comb coloration / flanging", note: "the dry and delayed copies sum into a comb of evenly spaced notches; sweeping the time slides the comb, which is flanging." };
+    return { key: "echo", label: "Discrete echo", note: "past the roughly 30 to 40 ms fusion threshold the repeat splits off as a separate echo the ear hears on its own." };
+  }
+
+  function applyTime() {
+    var t = ctx ? ctx.currentTime : 0;
+    var sec = params.timeMs / 1000;
+    if (delayFF) delayFF.delayTime.setValueAtTime(sec, t);
+    // The feedback delay is clamped by the browser to ~2.9 ms minimum because it
+    // sits in a cycle; that is fine, its repeats only matter from a few ms upward.
+    if (fbDelay) fbDelay.delayTime.setValueAtTime(sec, t);
+    var z = zoneFor(params.timeMs);
+    var zEl = $("zone");
+    zEl.textContent = z.label;
+    zEl.className = "zone " + z.key;
+    $("zone-note").textContent = z.note;
+  }
+
+  function applyMix() {
+    if (!ctx) return;
+    var t = ctx.currentTime, m = params.mix;
+    dry.gain.setTargetAtTime(1 - m, t, 0.01);
+    wet.gain.setTargetAtTime(m, t, 0.01);
+    // The regeneration path is silent at feedback 0 so a pure feedforward comb is
+    // heard, then fades in with feedback.
+    fbWet.gain.setTargetAtTime(m * params.feedback, t, 0.01);
+  }
+
+  function applyFeedback() {
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    fb.gain.setTargetAtTime(params.feedback * 0.92, t, 0.01);
+    fbWet.gain.setTargetAtTime(params.mix * params.feedback, t, 0.01);
+  }
+
+  function makeNoiseBuffer() {
+    // 2 s of looping white noise: a broadband source so the comb notches are
+    // clearly visible on the FFT and the flanger swoosh is audible on the sweep.
+    var len = Math.floor(ctx.sampleRate * 2);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * 0.6;
+    return buf;
+  }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.9;
+    mix = ctx.createGain(); mix.gain.value = 1.0;
+
+    srcGain = ctx.createGain(); srcGain.gain.value = 0.0;   // play gate: silent until Play
+
+    // source A: melodic sawtooth loop (default). One continuously running
+    // sawtooth; pitch is set per step and melodyEnv plucks each note, so the
+    // attacks read as impulses and rests fall silent.
+    sawOsc = ctx.createOscillator();
+    sawOsc.type = "sawtooth";
+    sawOsc.frequency.value = SEQ[0];
+    melodyEnv = ctx.createGain(); melodyEnv.gain.value = 0.0;   // silent between notes / during rests
+    sawOsc.connect(melodyEnv).connect(srcGain);
+
+    // source B: broadband white noise (kept for the cleanest comb-notch scope).
+    noiseGain = ctx.createGain(); noiseGain.gain.value = 0.0;   // muted unless the noise source is chosen
+    noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = makeNoiseBuffer();
+    noiseSrc.loop = true;
+    noiseSrc.connect(noiseGain).connect(srcGain);
+
+    // dry copy
+    dry = ctx.createGain(); dry.gain.value = 1 - params.mix;
+    srcGain.connect(dry).connect(mix);
+
+    // feedforward comb (no cycle: reaches sub-ms, the genuine width + comb region)
+    delayFF = ctx.createDelay(1.5);
+    delayFF.delayTime.value = params.timeMs / 1000;
+    wet = ctx.createGain(); wet.gain.value = params.mix;
+    wetPan = ctx.createStereoPanner(); wetPan.pan.value = 0.6;   // mild spread so the short-delay region reads as width; still sums for the comb
+    srcGain.connect(delayFF).connect(wet).connect(wetPan).connect(mix);
+
+    // feedback delay (in a cycle: clamped to ~2.9 ms min, carries regenerating echoes)
+    fbDelay = ctx.createDelay(1.5);
+    fbDelay.delayTime.value = params.timeMs / 1000;
+    fb = ctx.createGain(); fb.gain.value = params.feedback * 0.92;
+    fbWet = ctx.createGain(); fbWet.gain.value = params.mix * params.feedback;
+    fbPan = ctx.createStereoPanner(); fbPan.pan.value = -0.6;
+    srcGain.connect(fbDelay);
+    fbDelay.connect(fb).connect(fbDelay);        // close the regeneration loop
+    fbDelay.connect(fbWet).connect(fbPan).connect(mix);
+
+    mix.connect(master);
+    Shell.connectMaster(ctx, master);            // stereo safety limiter (do NOT bypass)
+    Shell.createScope(ctx, mix, $("scope"), "fft");  // read-only spectrum tap on the delayed mix
+
+    noiseSrc.start();
+    sawOsc.start();
+  }
+
+  // ---- melody scheduler (Web Audio lookahead) ----
+  function scheduleStep(i, t) {
+    var f = SEQ[i];
+    if (f === null) return;                                 // rest: envelope is already at 0
+    sawOsc.frequency.setValueAtTime(f, t);
+    var g = melodyEnv.gain;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(0.0001, t);
+    g.linearRampToValueAtTime(NOTE_PEAK, t + 0.006);        // fast attack = the impulse
+    g.exponentialRampToValueAtTime(0.0015, t + NOTE_LEN);   // short plucky decay
+    g.setValueAtTime(0, t + NOTE_LEN + 0.004);              // hard silence for the rest of the step
+  }
+
+  function schedulerTick() {
+    if (!ctx) return;
+    while (nextNoteTime < ctx.currentTime + LOOKAHEAD) {
+      scheduleStep(seqStep, nextNoteTime);
+      nextNoteTime += STEP_DUR;
+      seqStep = (seqStep + 1) % SEQ.length;
+    }
+  }
+
+  function startScheduler() {
+    if (schedTimer !== null || !ctx) return;
+    seqStep = 0;
+    nextNoteTime = ctx.currentTime + 0.08;
+    schedulerTick();
+    schedTimer = setInterval(schedulerTick, TICK_MS);
+  }
+
+  function stopScheduler() {
+    if (schedTimer !== null) { clearInterval(schedTimer); schedTimer = null; }
+    if (melodyEnv && ctx) {
+      var t = ctx.currentTime;
+      melodyEnv.gain.cancelScheduledValues(t);
+      melodyEnv.gain.setValueAtTime(0, t);
+    }
+  }
+
+  function setSource(mode) {
+    sourceMode = mode;
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    if (mode === "noise") {
+      stopScheduler();
+      noiseGain.gain.setTargetAtTime(0.6, t, 0.01);
+    } else {
+      noiseGain.gain.setTargetAtTime(0.0, t, 0.01);
+      if (playing) startScheduler();
+    }
+  }
+
+  function setPlay(on) {
+    if (!ctx) return;
+    playing = on;
+    var t = ctx.currentTime;
+    srcGain.gain.cancelScheduledValues(t);
+    srcGain.gain.linearRampToValueAtTime(on ? 0.9 : 0.0, t + 0.05);
+    if (on) {
+      if (sourceMode === "melody") startScheduler();
+    } else {
+      stopScheduler();
+    }
+    $("play").innerHTML = on ? "&#9632; Stop source" : "&#9658; Play source";
+  }
+
+  // ---- sliders ----
+  $("time").addEventListener("input", function () {
+    params.timeMs = msForPos(+this.value);
+    $("time-v").textContent = params.timeMs < 10
+      ? params.timeMs.toFixed(2) + " ms"
+      : Math.round(params.timeMs) + " ms";
+    applyTime();
+  });
+  $("feedback").addEventListener("input", function () {
+    params.feedback = +this.value; $("feedback-v").textContent = params.feedback.toFixed(2);
+    applyFeedback();
+  });
+  $("mix").addEventListener("input", function () {
+    params.mix = +this.value; $("mix-v").textContent = Math.round(params.mix * 100) + "% wet";
+    applyMix();
+  });
+  var sourceRadios = document.getElementsByName("source");
+  for (var si = 0; si < sourceRadios.length; si++) {
+    sourceRadios[si].addEventListener("change", function () {
+      if (this.checked) setSource(this.value);
+    });
+  }
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); applyTime(); }
+    Shell.gate(ctx, $("start"), function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play source for the sawtooth melody (C-D-E-F-G then rests), then sweep the delay time from its minimum upward.");
+    });
+  });
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    setPlay(!playing);
+    setStatus(playing ? "Source on. Sweep the delay time: hear the echo separate from each note, and watch the comb notches slide." : "Source stopped.");
+  });
+
+  // ---- init readouts ----
+  $("time-v").textContent = params.timeMs.toFixed(2) + " ms";
+  $("feedback-v").textContent = params.feedback.toFixed(2);
+  $("mix-v").textContent = Math.round(params.mix * 100) + "% wet";
+})();
+</script>
+</body>
+</html>
