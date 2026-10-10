@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-karplus (slug: karplus)
+  The Karplus-Strong plucked-string algorithm for the Wednesday physical-modeling
+  session (wk08-wed-physical-modeling): a short burst of noise injected once into a
+  delay line with feedback and an in-loop low-pass filter. It makes the page's
+  algorithm walkthrough audible: excite with broadband noise, then let it circulate
+  through delay -> damping -> feedback so the string rings and darkens as it decays.
+
+  The player presses Pluck to inject the noise burst, sets the pitch (the delay
+  length: fundamental = 1 / delayTime), the feedback/sustain (how long it rings),
+  and the damping (the in-loop low-pass cutoff = how bright and how fast it decays).
+  Two material presets, "Bright steel" and "Muted nylon", set the feedback+damping
+  pair so the SAME model is heard as two instruments (the page's "one model, two
+  materials" example). A live time-domain scope shows the pluck decay.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext, D-08). No build step,
+  no synthesis library. Hosted on GitHub Pages and embedded into the Canvas page via
+  an <iframe>. Audio NEVER starts on load: the Start button calls audioContext
+  .resume() through Shell.gate, and the master terminates through Shell.connectMaster.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Karplus-Strong pluck (noise burst &#8594; delay &#8594; damping loop)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .mat-btn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  .chain { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+  .chain b { color: var(--accent); }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Karplus-Strong: pluck a string from a burst of noise</h1>
+  <p class="instructions">
+    Inject a short burst of <strong>noise</strong> into a <strong>delay line</strong> whose length sets the
+    pitch, close the loop with <strong>feedback</strong>, and darken each pass with an in-loop
+    <strong>low-pass filter</strong>. The result rings like a plucked string and fades as the high
+    harmonics die first. Press Start, then press Pluck and move the sliders.
+  </p>
+  <p class="chain">noise burst &#8594; <b>sum</b> &#8594; <b>delay</b> (pitch) &#8594; <b>low-pass</b> (damping) &#8594; <b>feedback</b> &#8594; back to sum (and out)</p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="pluck" class="play" type="button" disabled>&#9658; Pluck</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: the string (pitch = delay length)</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="pitch">Pitch <span class="val" id="pitch-v">110 Hz</span></label>
+        <!--
+          A DelayNode inside a feedback cycle is clamped by the browser to a
+          minimum delay of one render quantum (128 samples), so the highest
+          reliable pitch is about sampleRate / 128 (~330-375 Hz). The slider is
+          capped at 330 Hz so every position actually loops and sounds; pitches
+          above that would clamp and sound wrong.
+        -->
+        <input id="pitch" type="range" min="55" max="330" step="1" value="110">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 3: one model, two materials</legend>
+    <div class="row" style="margin-bottom:12px;">
+      <button id="m-steel" class="mat-btn" type="button">Bright steel</button>
+      <button id="m-nylon" class="mat-btn" type="button">Muted nylon</button>
+    </div>
+    <div class="controls">
+      <div class="ctl">
+        <label for="feedback">Feedback (sustain) <span class="val" id="feedback-v">0.960</span></label>
+        <input id="feedback" type="range" min="0.80" max="0.999" step="0.001" value="0.96">
+      </div>
+      <div class="ctl">
+        <label for="damping">Damping (in-loop low-pass) <span class="val" id="damping-v">4000 Hz</span></label>
+        <input id="damping" type="range" min="300" max="12000" step="10" value="4000">
+      </div>
+    </div>
+    <p class="note">
+      The presets set the feedback and damping pair for you: <strong>Bright steel</strong> keeps a high
+      cutoff and near-one feedback (a long, ringing steel string); <strong>Muted nylon</strong> lowers
+      both (a short, dark nylon pluck). Same algorithm, two instruments.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>The pluck decay (live scope)</legend>
+    <canvas id="scope" width="780" height="120" aria-label="Live time-domain waveform of the Karplus-Strong loop showing the pluck attack and its decay"></canvas>
+    <p class="note">
+      Watch the loop fill on the pluck and then decay: higher feedback holds the ring longer, and
+      lower damping (a lower cutoff) darkens the tone and shortens it, because the low-pass removes a
+      little high-frequency energy on every pass around the loop.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, sumNode = null, delay = null, damp = null, fb = null, noiseBuf = null;
+  var params = { pitch: 110, feedback: 0.96, damping: 4000 };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  function makeNoiseBuffer() {
+    // ~30 ms broadband white-noise excitation, filled once and replayed per pluck.
+    var len = Math.floor(ctx.sampleRate * 0.03);
+    var buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function buildGraph() {
+    master = ctx.createGain(); master.gain.value = 0.9;
+
+    // The loop: sum -> delay (pitch) -> low-pass (damping) -> feedback -> back to sum.
+    sumNode = ctx.createGain(); sumNode.gain.value = 1.0;
+    delay = ctx.createDelay(0.1);                       // maxDelayTime 0.1 s covers 55 Hz+
+    delay.delayTime.value = 1 / params.pitch;           // fundamental = 1 / delayTime
+    damp = ctx.createBiquadFilter(); damp.type = "lowpass";
+    damp.frequency.value = params.damping;
+    fb = ctx.createGain(); fb.gain.value = params.feedback;
+
+    sumNode.connect(delay).connect(damp).connect(fb);
+    fb.connect(sumNode);        // close the feedback loop
+    fb.connect(master);         // tap the loop output to the master
+
+    Shell.connectMaster(ctx, master);                   // stereo safety limiter (do NOT bypass)
+    Shell.createScope(ctx, fb, $("scope"), "scope");     // read-only time-domain tap on the loop output
+
+    noiseBuf = makeNoiseBuffer();
+  }
+
+  function pluck() {
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    var src = ctx.createBufferSource();
+    src.buffer = noiseBuf;
+    src.connect(sumNode);
+    src.start(t);
+    src.stop(t + noiseBuf.duration + 0.01);
+    setStatus("Plucked. The burst circulates through the delay and decays. Change feedback and damping and pluck again.");
+  }
+
+  // ---- material presets ----
+  var matBtns = { steel: "m-steel", nylon: "m-nylon" };
+  function applyPreset(name) {
+    if (name === "steel") { params.feedback = 0.995; params.damping = 9000; }
+    else { params.feedback = 0.88; params.damping = 1200; }
+    // reflect into the UI + live nodes
+    $("feedback").value = params.feedback; $("feedback-v").textContent = params.feedback.toFixed(3);
+    $("damping").value = params.damping; $("damping-v").textContent = Math.round(params.damping) + " Hz";
+    if (fb) fb.gain.setTargetAtTime(params.feedback, ctx.currentTime, 0.01);
+    if (damp) damp.frequency.setTargetAtTime(params.damping, ctx.currentTime, 0.01);
+    Object.keys(matBtns).forEach(function (k) { $(matBtns[k]).classList.toggle("active", k === name); });
+  }
+  $("m-steel").addEventListener("click", function () { applyPreset("steel"); });
+  $("m-nylon").addEventListener("click", function () { applyPreset("nylon"); });
+
+  function clearPresets() {
+    Object.keys(matBtns).forEach(function (k) { $(matBtns[k]).classList.remove("active"); });
+  }
+
+  // ---- sliders ----
+  $("pitch").addEventListener("input", function () {
+    params.pitch = +this.value; $("pitch-v").textContent = Math.round(params.pitch) + " Hz";
+    if (delay) delay.delayTime.setValueAtTime(1 / params.pitch, ctx.currentTime);
+  });
+  $("feedback").addEventListener("input", function () {
+    params.feedback = +this.value; $("feedback-v").textContent = params.feedback.toFixed(3);
+    if (fb) fb.gain.setTargetAtTime(params.feedback, ctx.currentTime, 0.01);
+    clearPresets();
+  });
+  $("damping").addEventListener("input", function () {
+    params.damping = +this.value; $("damping-v").textContent = Math.round(params.damping) + " Hz";
+    if (damp) damp.frequency.setTargetAtTime(params.damping, ctx.currentTime, 0.01);
+    clearPresets();
+  });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); }
+    Shell.gate(ctx, $("start"), function () {
+      $("pluck").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Pluck, then shape the ring with feedback and damping (or the steel/nylon presets).");
+    });
+  });
+  $("pluck").addEventListener("click", pluck);
+})();
+</script>
+</body>
+</html>
