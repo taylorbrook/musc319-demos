@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-chip-arp (slug: chip-arp)
+  A chiptune voice for the C5 video-game-music session, built around the SID
+  single-channel arpeggio trick: one oscillator steps through a chord's notes
+  fast enough (roughly 8 to 30 notes per second) that the ear fuses them into
+  an implied chord, the technique Rob Hubbard used on the Commodore 64 so one
+  of the SID's three voices could carry the harmony. Pick a chip waveform
+  (square, narrow pulse, triangle, sawtooth), pick a chord, set the arp rate,
+  and A/B the one-channel arpeggio against a real held chord (three
+  simultaneous oscillators). A noise voice supplies the PSG/NES-style
+  percussion pulse. Everything is synthesized in the browser; nothing is
+  loaded from disk.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext) on the shared
+  demo shell (../_shared/shell.css + shell.js; master output terminates through
+  Shell.connectMaster's safety limiter). No build step: open by double-clicking
+  this file. Hosted on GitHub Pages and embedded into the Canvas page via an
+  <iframe>. Browsers suspend the AudioContext until a user gesture and a
+  cross-origin iframe cannot rely on autoplay, so audio NEVER starts on load:
+  the Start button creates and resumes the AudioContext from inside the demo.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Chip arpeggio (imply a chord from a single channel)</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  /* demo-specific: culture-track accent + segmented-button active state only
+     (palette, controls, focus ring come from ../_shared/shell.css) */
+  :root { --accent: #9333EA; } /* culture-track accent (matches the c5 page) */
+  button.seg.active { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  select {
+    font: inherit; font-size: 15px; padding: 8px 10px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text);
+  }
+  .modewrap { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Chip arpeggio: one channel that implies a whole chord</h1>
+  <p class="instructions">
+    The SID trick from the session, live: one <strong>chiptune oscillator</strong> steps through a
+    chord's notes fast enough that they fuse into an implied harmony, so a
+    <strong>single channel</strong> does the work of three. Pick a chip <strong>waveform</strong>
+    (square, narrow pulse, triangle, sawtooth), pick a <strong>chord</strong>, set the <strong>arp rate</strong>,
+    then A/B the one-channel <strong>arpeggio</strong> against a real <strong>held chord</strong> played by
+    three oscillators at once. Toggle the <strong>noise</strong> voice for the PSG-style percussion pulse.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play tone</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset id="fs-voice" disabled>
+    <legend>Step 2: the chip voice</legend>
+    <div class="row" role="group" aria-label="Waveform">
+      <span style="font-size:13px;font-weight:600;">Waveform:</span>
+      <button class="seg wave active" data-wave="square" type="button" aria-pressed="true">Square</button>
+      <button class="seg wave" data-wave="pulse25" type="button" aria-pressed="false">Pulse 25%</button>
+      <button class="seg wave" data-wave="pulse12" type="button" aria-pressed="false">Pulse 12.5%</button>
+      <button class="seg wave" data-wave="triangle" type="button" aria-pressed="false">Triangle</button>
+      <button class="seg wave" data-wave="sawtooth" type="button" aria-pressed="false">Sawtooth</button>
+    </div>
+    <div class="controls" style="margin-top:12px;">
+      <div class="ctl">
+        <label for="chord">Chord</label>
+        <select id="chord">
+          <option value="cmaj" selected>C major</option>
+          <option value="cmin">C minor</option>
+          <option value="fmaj">F major</option>
+          <option value="gmaj">G major</option>
+          <option value="amin">A minor</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label for="rate">Arp rate <span class="val" id="rate-v">15 notes/s</span></label>
+        <input id="rate" type="range" min="8" max="30" step="1" value="15">
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset id="fs-mode" disabled>
+    <legend>Step 3: one channel or three</legend>
+    <div class="modewrap">
+      <button id="arp-toggle" class="seg active" type="button" aria-pressed="true">Arpeggiator: ON</button>
+      <span style="font-size:13px;font-weight:600;">Mode:</span>
+      <button id="mode-arp" class="seg active" type="button" aria-pressed="true">A: Arpeggio (1 channel)</button>
+      <button id="mode-chord" class="seg" type="button" aria-pressed="false">B: Held chord (3 channels)</button>
+      <button id="noise-toggle" class="seg" type="button" aria-pressed="false">Noise percussion: OFF</button>
+    </div>
+    <p class="note">With the arpeggiator OFF, the single channel just holds the chord's root: one note, no harmony.
+      Turn it ON and the same one channel implies the whole chord. Mode B spends three channels to play the chord for real.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Spectrum (live FFT of the master output)</legend>
+    <canvas id="scope" width="780" height="120" aria-label="Live spectrum of the chip voice. Square and pulse waveforms show a comb of harmonics; the narrower the pulse, the more evenly the energy spreads across the comb."></canvas>
+    <p class="note">Watch the harmonic comb change as you switch waveforms: the buzzy chip timbre is this comb.</p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null;
+  var playingTone = false;
+
+  // running nodes while the tone plays
+  var arpOsc = null, arpAmp = null;      // the single arpeggio channel
+  var chordOscs = null, chordBus = null; // the three held-chord channels
+  var noiseBuffer = null;
+
+  // scheduling (lookahead pattern)
+  var scheduler = null;
+  var LOOKAHEAD = 0.1;  // s
+  var TICK = 25;        // ms
+  var nextArpTime = 0, arpIndex = 0;
+  var nextNoiseTime = 0, noiseIndex = 0;
+  var NOISE_INTERVAL = 0.25; // steady percussion pulse (s)
+
+  var params = {
+    wave: "square",
+    chord: "cmaj",
+    rate: 15,          // arp notes per second
+    arpOn: true,
+    mode: "arp",       // "arp" | "chord"
+    noiseOn: false
+  };
+
+  // chords as MIDI note numbers (root position triads, chip register)
+  var CHORDS = {
+    cmaj: [72, 76, 79],
+    cmin: [72, 75, 79],
+    fmaj: [77, 81, 84],
+    gmaj: [79, 83, 86],
+    amin: [69, 72, 76]
+  };
+  var CHORD_NAMES = { cmaj: "C major", cmin: "C minor", fmaj: "F major", gmaj: "G major", amin: "A minor" };
+
+  function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+  function chordFreqs() { return CHORDS[params.chord].map(midiToHz); }
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // ---------- pulse waves (PeriodicWave from Fourier coefficients) ----------
+  var pulseWaves = {};
+  function makePulseWave(duty) {
+    var N = 64;
+    var real = new Float32Array(N + 1), imag = new Float32Array(N + 1);
+    for (var n = 1; n <= N; n++) {
+      real[n] = Math.sin(2 * Math.PI * n * duty) / (n * Math.PI);
+      imag[n] = 2 * Math.pow(Math.sin(Math.PI * n * duty), 2) / (n * Math.PI);
+    }
+    return ctx.createPeriodicWave(real, imag);
+  }
+
+  function applyWave(osc) {
+    if (params.wave === "pulse25") osc.setPeriodicWave(pulseWaves.p25);
+    else if (params.wave === "pulse12") osc.setPeriodicWave(pulseWaves.p12);
+    else osc.type = params.wave; // square | triangle | sawtooth
+  }
+
+  function applyWaveToAll() {
+    if (arpOsc) applyWave(arpOsc);
+    if (chordOscs) chordOscs.forEach(applyWave);
+  }
+
+  // ---------- noise percussion voice (PSG/NES style) ----------
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 1.0);
+    var buf = ctx.createBuffer(1, len, sr);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function playNoiseHit(when, accent) {
+    var n = ctx.createBufferSource(); n.buffer = noiseBuffer;
+    var hp = ctx.createBiquadFilter(); hp.type = "highpass";
+    hp.frequency.value = accent ? 3500 : 6500;
+    var g = ctx.createGain();
+    var amp = accent ? 0.3 : 0.18;
+    var dur = accent ? 0.09 : 0.04;
+    g.gain.setValueAtTime(amp, when);
+    g.gain.exponentialRampToValueAtTime(0.0006, when + dur);
+    n.connect(hp).connect(g).connect(master);
+    n.start(when); n.stop(when + dur + 0.02);
+  }
+
+  // ---------- arp scheduling ----------
+  function scheduleArpTick(when) {
+    var freqs = chordFreqs();
+    var f = freqs[arpIndex % freqs.length];
+    arpOsc.frequency.setValueAtTime(f, when);
+    // a short re-attack so the step reads cleanly, chip-style
+    arpAmp.gain.cancelScheduledValues(when);
+    arpAmp.gain.setValueAtTime(0.0001, when);
+    arpAmp.gain.linearRampToValueAtTime(0.4, when + 0.005);
+    arpIndex++;
+  }
+
+  // with the arpeggiator OFF the single channel just holds the root
+  function applyArpHold() {
+    var now = ctx.currentTime;
+    arpAmp.gain.cancelScheduledValues(now);
+    arpOsc.frequency.setValueAtTime(chordFreqs()[0], now);
+    arpAmp.gain.setTargetAtTime(0.4, now, 0.01);
+  }
+
+  function scheduleLoop() {
+    var horizon = ctx.currentTime + LOOKAHEAD;
+    if (params.mode === "arp" && params.arpOn) {
+      while (nextArpTime < horizon) {
+        scheduleArpTick(nextArpTime);
+        nextArpTime += 1 / params.rate;
+      }
+    }
+    if (params.noiseOn) {
+      while (nextNoiseTime < horizon) {
+        playNoiseHit(nextNoiseTime, noiseIndex % 4 === 0);
+        nextNoiseTime += NOISE_INTERVAL;
+        noiseIndex++;
+      }
+    }
+  }
+
+  // ---------- tone start / stop ----------
+  function startTone() {
+    var now = ctx.currentTime;
+
+    // the single arpeggio channel
+    arpAmp = ctx.createGain(); arpAmp.gain.value = 0;
+    arpAmp.connect(master);
+    arpOsc = ctx.createOscillator();
+    applyWave(arpOsc);
+    arpOsc.frequency.value = chordFreqs()[0];
+    arpOsc.connect(arpAmp);
+    arpOsc.start(now);
+
+    // the three held-chord channels
+    chordBus = ctx.createGain(); chordBus.gain.value = 0;
+    chordBus.connect(master);
+    chordOscs = chordFreqs().map(function (f) {
+      var o = ctx.createOscillator();
+      applyWave(o);
+      o.frequency.value = f;
+      var g = ctx.createGain(); g.gain.value = 0.16;
+      o.connect(g).connect(chordBus);
+      o.start(now);
+      return o;
+    });
+
+    arpIndex = 0; noiseIndex = 0;
+    nextArpTime = now + 0.05;
+    nextNoiseTime = now + 0.05;
+    applyMode();
+    scheduler = setInterval(scheduleLoop, TICK);
+  }
+
+  function stopTone() {
+    clearInterval(scheduler); scheduler = null;
+    var now = ctx.currentTime;
+    arpAmp.gain.cancelScheduledValues(now);
+    arpAmp.gain.setValueAtTime(arpAmp.gain.value, now);
+    arpAmp.gain.linearRampToValueAtTime(0, now + 0.03);
+    chordBus.gain.cancelScheduledValues(now);
+    chordBus.gain.setValueAtTime(chordBus.gain.value, now);
+    chordBus.gain.linearRampToValueAtTime(0, now + 0.03);
+    arpOsc.stop(now + 0.06);
+    chordOscs.forEach(function (o) { o.stop(now + 0.06); });
+    arpOsc = null; arpAmp = null; chordOscs = null; chordBus = null;
+  }
+
+  // ---------- mode switching (the A/B) ----------
+  function applyMode() {
+    if (!ctx || !playingTone) return;
+    var now = ctx.currentTime;
+    if (params.mode === "arp") {
+      chordBus.gain.setTargetAtTime(0, now, 0.015);
+      if (params.arpOn) {
+        arpIndex = 0;
+        nextArpTime = Math.max(nextArpTime, now + 0.03);
+      } else {
+        applyArpHold();
+      }
+    } else {
+      // silence the arp channel, sound the triad on three channels
+      arpAmp.gain.cancelScheduledValues(now);
+      arpAmp.gain.setTargetAtTime(0, now, 0.015);
+      chordFreqs().forEach(function (f, i) { chordOscs[i].frequency.setValueAtTime(f, now); });
+      chordBus.gain.setTargetAtTime(1, now, 0.015);
+    }
+  }
+
+  function announce() {
+    var mode = (params.mode === "arp")
+      ? (params.arpOn
+          ? "Arpeggio on one channel at " + params.rate + " notes per second"
+          : "Single held note on one channel (arpeggiator off)")
+      : "Held chord on three channels";
+    setStatus(mode + ". Chord: " + CHORD_NAMES[params.chord] + ". Noise percussion " + (params.noiseOn ? "on" : "off") + ".");
+  }
+
+  // ---------- controls ----------
+  Array.prototype.forEach.call(document.querySelectorAll("button.wave"), function (btn) {
+    btn.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("button.wave"), function (b) {
+        b.classList.remove("active"); b.setAttribute("aria-pressed", "false");
+      });
+      btn.classList.add("active"); btn.setAttribute("aria-pressed", "true");
+      params.wave = btn.getAttribute("data-wave");
+      applyWaveToAll();
+    });
+  });
+
+  $("chord").addEventListener("change", function () {
+    params.chord = this.value;
+    if (playingTone && params.mode === "chord") {
+      var now = ctx.currentTime;
+      chordFreqs().forEach(function (f, i) { chordOscs[i].frequency.setValueAtTime(f, now); });
+    }
+    announce();
+  });
+
+  $("rate").addEventListener("input", function () {
+    params.rate = +this.value;
+    $("rate-v").textContent = this.value + " notes/s";
+    announce();
+  });
+
+  $("arp-toggle").addEventListener("click", function () {
+    params.arpOn = !params.arpOn;
+    this.classList.toggle("active", params.arpOn);
+    this.setAttribute("aria-pressed", params.arpOn ? "true" : "false");
+    this.textContent = "Arpeggiator: " + (params.arpOn ? "ON" : "OFF");
+    if (playingTone && params.mode === "arp") {
+      if (params.arpOn) { arpIndex = 0; nextArpTime = ctx.currentTime + 0.05; }
+      else applyArpHold();
+    }
+    announce();
+  });
+
+  function setMode(mode) {
+    params.mode = mode;
+    var a = $("mode-arp"), b = $("mode-chord");
+    a.classList.toggle("active", mode === "arp");
+    a.setAttribute("aria-pressed", mode === "arp" ? "true" : "false");
+    b.classList.toggle("active", mode === "chord");
+    b.setAttribute("aria-pressed", mode === "chord" ? "true" : "false");
+    $("arp-toggle").disabled = (mode === "chord");
+    applyMode();
+    announce();
+  }
+  $("mode-arp").addEventListener("click", function () { setMode("arp"); });
+  $("mode-chord").addEventListener("click", function () { setMode("chord"); });
+
+  $("noise-toggle").addEventListener("click", function () {
+    params.noiseOn = !params.noiseOn;
+    this.classList.toggle("active", params.noiseOn);
+    this.setAttribute("aria-pressed", params.noiseOn ? "true" : "false");
+    this.textContent = "Noise percussion: " + (params.noiseOn ? "ON" : "OFF");
+    if (params.noiseOn && ctx) { nextNoiseTime = ctx.currentTime + 0.05; noiseIndex = 0; }
+    announce();
+  });
+
+  // ---------- transport: audio NEVER starts on load ----------
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.8;
+      Shell.connectMaster(ctx, master);
+      noiseBuffer = buildNoise();
+      pulseWaves.p25 = makePulseWave(0.25);
+      pulseWaves.p12 = makePulseWave(0.125);
+      Shell.createScope(ctx, master, $("scope"), "fft"); // read-only spectrum tap
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false;
+      $("start").disabled = true;
+      $("fs-voice").disabled = false;
+      $("fs-mode").disabled = false;
+      setStatus("Sound is on. Press Play tone to hear the chip voice.");
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playingTone) {
+      playingTone = true;
+      startTone();
+      $("play").innerHTML = "&#9632; Stop tone";
+      announce();
+    } else {
+      playingTone = false;
+      stopTone();
+      $("play").innerHTML = "&#9658; Play tone";
+      setStatus("Stopped.");
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-loudness (slug: loudness)
+  A loudness-and-limiting explorer for the Monday mastering session. It makes the
+  central modern mastering point audible: pushing a master louder does not win,
+  because streaming platforms normalize playback, so all you trade away is dynamic
+  range.
+
+  A short looping beat (kick, snare, hats, a sustained bass: real transients plus
+  body) runs through a master chain:
+      loop -> DRIVE (push into the limiter) -> brickwall limiter -> makeup -> mastered
+  The mastered signal is metered three ways:
+    - Produced loudness  : approximate, K-weighted short-term loudness (LU). This is
+      a teaching approximation of ITU-R BS.1770 / LUFS: a high-pass plus a high
+      shelf (the K-weighting) feeding an RMS over a short window. It is NOT a
+      certified LUFS meter, but it moves the right way.
+    - Sample peak (dBFS) : the largest sample value (true inter-sample peak needs
+      oversampling, which this meter does not do; that gap is exactly why masters
+      are limited to about -1 dBTP rather than 0 dBFS).
+    - Dynamics (crest)   : sample peak minus produced loudness, the room left
+      between the average level and the peaks.
+  A Platform normalization switch then attenuates the output so the PLAYBACK
+  loudness sits at the streaming target (about -14 LU). With it on, push the Drive:
+  the produced loudness climbs and the dynamics shrink, but the playback loudness
+  does not move. Louder mastering bought nothing but lost dynamics.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe> (deploy +
+  UBC iframe domain allow-listing still pending). Browsers suspend the AudioContext
+  until a user gesture and a cross-origin iframe cannot rely on autoplay, so audio
+  NEVER starts on load: the Start button calls audioContext.resume() from inside.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Mastering (loudness &amp; limiting)</title>
+<style>
+  :root {
+    --accent: #1D4ED8;        /* technical-track accent */
+    --cult: #9333EA;
+    --warm: #C2410C;
+    --good: #15803D;
+    --text: #1A1A1A;
+    --muted: #52525B;
+    --border: #D4D4D8;
+    --surface: #F4F4F5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text); background: #FFFFFF; line-height: 1.5;
+  }
+  .demo { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; }
+  p.instructions { font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px 18px; margin: 0 0 16px; }
+  legend { font-size: 13px; font-weight: 600; color: var(--muted); padding: 0 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button {
+    font: inherit; font-size: 15px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.start, button.play { background: var(--accent); color: #FFFFFF; border-color: var(--accent); font-weight: 600; }
+  button.norm.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 22px; margin-top: 4px; }
+  .ctl { display: flex; flex-direction: column; gap: 3px; }
+  .ctl label { font-size: 13px; color: var(--text); font-weight: 600; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { font-size: 14px; color: var(--text); min-height: 1.4em; margin: 10px 0 0; }
+  .meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 4px; }
+  .meter { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+  .meter .k { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .meter .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+  .meter .u { font-size: 12px; color: var(--muted); }
+  .bar { height: 8px; border-radius: 4px; background: #E5E7EB; margin-top: 6px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; width: 0%; background: var(--accent); }
+  canvas { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: 100%; height: 120px; display: block; }
+  .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  .approx { color: var(--warm); font-weight: 600; }
+</style>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+</head>
+<body>
+<main class="demo">
+  <h1>Mastering: why louder does not win</h1>
+  <p class="instructions">
+    A short looping beat runs through a master chain: <strong>Drive</strong> pushes it into a <strong>brickwall limiter</strong>.
+    The meters show the <strong>produced loudness</strong>, the <strong>peak</strong>, and the <strong>dynamics</strong> left between
+    them. Turn on <strong>Platform normalization</strong> and push the Drive: the produced loudness climbs and the dynamics
+    shrink, but the <strong>playback loudness holds at the target</strong>. Press Start, then Play.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="play" class="play" type="button" disabled>&#9658; Play loop</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: master the loop</legend>
+    <div class="controls">
+      <div class="ctl">
+        <label for="drive">Drive into the limiter <span class="val" id="drive-v">0 dB</span></label>
+        <input id="drive" type="range" min="0" max="18" step="0.5" value="0">
+      </div>
+      <div class="ctl">
+        <label for="ceil">Limiter ceiling <span class="val" id="ceil-v">-1.0 dBFS</span></label>
+        <input id="ceil" type="range" min="-6" max="-0.3" step="0.1" value="-1">
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <button id="norm" class="norm" type="button">Platform normalization: OFF</button>
+      <span class="note" id="norm-note" style="margin:0;">Target -14 LU (Spotify / YouTube / Amazon).</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Meters</legend>
+    <div class="meters">
+      <div class="meter">
+        <div class="k">Produced loudness</div>
+        <div class="v"><span id="m-prod">--</span></div>
+        <div class="u">LU (approx, K-weighted)</div>
+        <div class="bar"><span id="b-prod"></span></div>
+      </div>
+      <div class="meter">
+        <div class="k">Playback loudness</div>
+        <div class="v"><span id="m-play">--</span></div>
+        <div class="u">LU after normalization</div>
+        <div class="bar"><span id="b-play" style="background:var(--good);"></span></div>
+      </div>
+      <div class="meter">
+        <div class="k">Sample peak</div>
+        <div class="v"><span id="m-peak">--</span></div>
+        <div class="u">dBFS (not true-peak)</div>
+        <div class="bar"><span id="b-peak" style="background:var(--warm);"></span></div>
+      </div>
+      <div class="meter">
+        <div class="k">Dynamics (crest)</div>
+        <div class="v"><span id="m-crest">--</span></div>
+        <div class="u">peak minus loudness</div>
+        <div class="bar"><span id="b-crest" style="background:var(--cult);"></span></div>
+      </div>
+    </div>
+    <canvas id="scope" width="780" height="120" aria-label="Scrolling waveform of the mastered signal"></canvas>
+    <p class="note">
+      The waveform is the mastered signal. As you raise the Drive it fills toward the ceiling and the transients flatten:
+      that is the dynamic range you are spending. <span class="approx">The loudness meter is an approximation of LUFS, not a
+      certified meter, and the peak is a sample peak, not a true inter-sample peak.</span>
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ctx = null, master = null, drive = null, limiter = null, makeup = null, mastered = null, normGain = null;
+  var kHP = null, kHS = null, loudAnalyser = null, peakAnalyser = null, scopeAnalyser = null;
+  var playing = false, schedTimer = null, meterReq = null;
+  var nextNoteTime = 0, step = 0;
+  var params = { drive: 0, ceiling: -1, norm: false };
+  var TARGET = -14;
+  var BPM = 110, STEPS = 16;            // 16th-note grid over one bar
+  var loudSmoothed = -60, peakHold = -60, playSmoothed = -60;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+  function dbToLin(db) { return Math.pow(10, db / 20); }
+
+  // ---------- the master chain ----------
+  function buildChain() {
+    drive = ctx.createGain(); drive.gain.value = dbToLin(params.drive);
+    limiter = ctx.createDynamicsCompressor();
+    limiter.knee.value = 0; limiter.ratio.value = 20;
+    limiter.attack.value = 0.002; limiter.release.value = 0.06;
+    limiter.threshold.value = params.ceiling - 1.0;     // threshold a touch under the ceiling
+    makeup = ctx.createGain(); makeup.gain.value = dbToLin(-params.ceiling); // bring the lid up toward 0
+    mastered = ctx.createGain(); mastered.gain.value = 1.0;
+    normGain = ctx.createGain(); normGain.gain.value = 1.0;
+    master = ctx.createGain(); master.gain.value = 0.9;
+
+    drive.connect(limiter).connect(makeup).connect(mastered);
+    mastered.connect(normGain).connect(master);
+    Shell.connectMaster(ctx, master);
+
+    // metering taps off the mastered (pre-normalization) signal
+    kHP = ctx.createBiquadFilter(); kHP.type = "highpass"; kHP.frequency.value = 60; kHP.Q.value = 0.5;
+    kHS = ctx.createBiquadFilter(); kHS.type = "highshelf"; kHS.frequency.value = 1500; kHS.gain.value = 4;
+    loudAnalyser = ctx.createAnalyser(); loudAnalyser.fftSize = 2048;
+    mastered.connect(kHP).connect(kHS).connect(loudAnalyser);
+    peakAnalyser = ctx.createAnalyser(); peakAnalyser.fftSize = 2048;
+    mastered.connect(peakAnalyser);
+    scopeAnalyser = ctx.createAnalyser(); scopeAnalyser.fftSize = 2048;
+    mastered.connect(scopeAnalyser);
+  }
+
+  function applyControls() {
+    if (!ctx) return;
+    var t = ctx.currentTime + 0.02;
+    drive.gain.linearRampToValueAtTime(dbToLin(params.drive), t);
+    limiter.threshold.setValueAtTime(params.ceiling - 1.0, ctx.currentTime);
+    makeup.gain.linearRampToValueAtTime(dbToLin(-params.ceiling), t);
+  }
+
+  // ---------- the looping beat ----------
+  function kick(time) {
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.setValueAtTime(120, time);
+    o.frequency.exponentialRampToValueAtTime(45, time + 0.12);
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(1.0, time + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0008, time + 0.22);
+    o.connect(g).connect(drive); o.start(time); o.stop(time + 0.26);
+  }
+  function snare(time) {
+    var src = ctx.createBufferSource(); src.buffer = noise;
+    var bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 1800; bp.Q.value = 0.6;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(0.7, time + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.0008, time + 0.13);
+    src.connect(bp).connect(g).connect(drive); src.start(time); src.stop(time + 0.16);
+  }
+  function hat(time) {
+    var src = ctx.createBufferSource(); src.buffer = noise;
+    var hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 7000;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(0.3, time + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0006, time + 0.045);
+    src.connect(hp).connect(g).connect(drive); src.start(time); src.stop(time + 0.06);
+  }
+  function bass(time, dur) {
+    var o = ctx.createOscillator(), lp = ctx.createBiquadFilter(), g = ctx.createGain();
+    o.type = "sawtooth"; o.frequency.value = 55;
+    lp.type = "lowpass"; lp.frequency.value = 350;
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(0.35, time + 0.02);
+    g.gain.setValueAtTime(0.35, time + dur - 0.05);
+    g.gain.exponentialRampToValueAtTime(0.0008, time + dur);
+    o.connect(lp).connect(g).connect(drive); o.start(time); o.stop(time + dur + 0.02);
+  }
+
+  var noise = null;
+  function buildNoise() {
+    var sr = ctx.sampleRate, len = Math.floor(sr * 0.4);
+    var buf = ctx.createBuffer(1, len, sr); var d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function scheduleStep(s, time) {
+    if (s % 4 === 0) kick(time);                 // beats
+    if (s % 8 === 4) snare(time);                // backbeat
+    if (s % 2 === 0) hat(time);                  // eighths
+    if (s % 16 === 0) bass(time, (60 / BPM) * 4); // one bass note per bar
+  }
+
+  function scheduler() {
+    var ahead = 0.12;
+    var stepDur = (60 / BPM) / 4;                // 16th note
+    while (nextNoteTime < ctx.currentTime + ahead) {
+      scheduleStep(step % STEPS, nextNoteTime);
+      nextNoteTime += stepDur;
+      step++;
+    }
+  }
+
+  // ---------- metering ----------
+  function rmsDb(analyser, weighted) {
+    var buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    var sum = 0, peak = 0;
+    for (var i = 0; i < buf.length; i++) {
+      var v = buf[i]; sum += v * v; var a = Math.abs(v); if (a > peak) peak = a;
+    }
+    var rms = Math.sqrt(sum / buf.length);
+    return { rms: 20 * Math.log10(rms + 1e-9), peak: 20 * Math.log10(peak + 1e-9) };
+  }
+
+  function meterFrame() {
+    if (!ctx) return;
+    var loud = rmsDb(loudAnalyser, true).rms;     // K-weighted RMS ~ LU
+    var pk = rmsDb(peakAnalyser, false).peak;
+    // smoothing
+    loudSmoothed = isFinite(loud) ? loudSmoothed + 0.2 * (loud - loudSmoothed) : loudSmoothed;
+    // peak: fast attack, slow release
+    if (pk > peakHold) peakHold = pk; else peakHold += 0.06 * (pk - peakHold);
+
+    var prod = loudSmoothed;
+    var crest = peakHold - prod;
+    var playback = prod, normDb = 0;
+    if (params.norm) {
+      normDb = Math.max(-24, Math.min(12, TARGET - prod));
+      playback = prod + normDb;
+    }
+    playSmoothed = playSmoothed + 0.25 * (playback - playSmoothed);
+    if (normGain) normGain.gain.setTargetAtTime(dbToLin(normDb), ctx.currentTime, 0.05);
+
+    $("m-prod").textContent = prod.toFixed(1);
+    $("m-play").textContent = playSmoothed.toFixed(1);
+    $("m-peak").textContent = peakHold.toFixed(1);
+    $("m-crest").textContent = crest.toFixed(1);
+    // bars: map -40..0 LU -> 0..100%, crest 0..20 -> 0..100%
+    var pct = function (db) { return Math.max(0, Math.min(100, (db + 40) / 40 * 100)); };
+    $("b-prod").style.width = pct(prod) + "%";
+    $("b-play").style.width = pct(playSmoothed) + "%";
+    $("b-peak").style.width = pct(peakHold) + "%";
+    $("b-crest").style.width = Math.max(0, Math.min(100, crest / 20 * 100)) + "%";
+
+    drawScope();
+    meterReq = requestAnimationFrame(meterFrame);
+  }
+
+  function drawScope() {
+    var c = $("scope"), g = c.getContext("2d");
+    var W = c.width, H = c.height;
+    g.clearRect(0, 0, W, H);
+    // ceiling guides
+    var ceilLin = dbToLin(params.ceiling);
+    g.strokeStyle = "#C2410C"; g.lineWidth = 1; g.setLineDash([5, 4]);
+    var yTop = H / 2 * (1 - ceilLin), yBot = H / 2 * (1 + ceilLin);
+    g.beginPath(); g.moveTo(0, yTop); g.lineTo(W, yTop); g.moveTo(0, yBot); g.lineTo(W, yBot); g.stroke();
+    g.setLineDash([]);
+    // waveform
+    var buf = new Float32Array(scopeAnalyser.fftSize);
+    scopeAnalyser.getFloatTimeDomainData(buf);
+    g.strokeStyle = "#1D4ED8"; g.lineWidth = 1.4; g.beginPath();
+    for (var i = 0; i < buf.length; i++) {
+      var x = i / (buf.length - 1) * W;
+      var y = H / 2 * (1 - buf[i]);
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+
+  function startLoop() {
+    nextNoteTime = ctx.currentTime + 0.05; step = 0;
+    schedTimer = setInterval(scheduler, 25);
+  }
+  function stopLoop() { if (schedTimer) { clearInterval(schedTimer); schedTimer = null; } }
+
+  // ---------- controls ----------
+  $("drive").addEventListener("input", function () {
+    params.drive = +this.value; $("drive-v").textContent = (+this.value).toFixed(1) + " dB"; applyControls();
+  });
+  $("ceil").addEventListener("input", function () {
+    params.ceiling = +this.value; $("ceil-v").textContent = (+this.value).toFixed(1) + " dBFS"; applyControls();
+  });
+  $("norm").addEventListener("click", function () {
+    params.norm = !params.norm;
+    this.classList.toggle("active", params.norm);
+    this.textContent = "Platform normalization: " + (params.norm ? "ON" : "OFF");
+    if (!params.norm && normGain) normGain.gain.setTargetAtTime(1.0, ctx.currentTime, 0.05);
+    $("norm-note").textContent = params.norm
+      ? "Output is pulled to -14 LU. Now push the Drive and watch playback hold."
+      : "Target -14 LU (Spotify / YouTube / Amazon).";
+  });
+
+  $("start").addEventListener("click", function () {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      buildChain(); noise = buildNoise();
+    }
+    ctx.resume().then(function () {
+      $("play").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Play, then raise the Drive with normalization OFF, then ON.");
+      meterFrame();
+    });
+  });
+
+  $("play").addEventListener("click", function () {
+    if (!ctx) return;
+    if (!playing) {
+      playing = true; startLoop();
+      $("play").innerHTML = "&#9632; Stop loop";
+      setStatus("Playing. Raise the Drive: dynamics shrink. Turn normalization ON: playback holds at the target.");
+    } else {
+      playing = false; stopLoop();
+      $("play").innerHTML = "&#9658; Play loop";
+      setStatus("Stopped.");
+    }
+  });
+})();
+</script>
+</body>
+</html>

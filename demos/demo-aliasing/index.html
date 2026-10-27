@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<!--
+  MUSC 319 / demo-aliasing (slug: aliasing)
+  "Aliasing as a falling tone" for the Monday "editing: Nyquist & aliasing"
+  session (wk03-mon-editing, 2026-09-21). Fulfils the page's audio example: a
+  tone swept upward past the Nyquist limit whose HEARD pitch turns and folds
+  back down instead of continuing to rise.
+
+  GENUINE aliasing, not a computed fake. Web Audio's OscillatorNode is
+  band-limited and will not alias, so the aliasing voice is a NAIVE
+  (non-band-limited) sampling of a rising sine baked sample-by-sample into an
+  AudioBuffer at a deliberately low MODEL rate (fsModel = 8000 Hz, Nyquist
+  4000 Hz). The too-sparse samples fold exactly as real undersampling does; the
+  context resamples 8000 -> device rate (band-limited), preserving the baked-in
+  alias. The "Band-limited" voice plays the SAME true-frequency sweep through a
+  real OscillatorNode for an honest no-aliasing comparison.
+
+  The foldover map mirrors the page figure nyquist-foldover.png: heard frequency
+  (y) vs true input frequency (x), with the repeating reflection triangle and a
+  live playhead during the sweep.
+
+  Self-contained, dependency-free Web Audio (raw AudioContext). No build step.
+  Hosted on GitHub Pages and embedded into the Canvas page via an <iframe>.
+  Audio NEVER starts on load: the Start button calls ctx.resume() (Shell.gate).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSC 319: Aliasing as a falling tone</title>
+<link rel="stylesheet" href="../_shared/shell.css">
+<script src="../_shared/shell.js"></script>
+<style>
+  .mode-btn.active { background: var(--good); color: #FFFFFF; border-color: var(--good); font-weight: 600; }
+  canvas#map { height: 250px; }
+  .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 4px; }
+  .rdg { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface); }
+  .rdg .k { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .rdg .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+  .rdg .u { font-size: 12px; color: var(--muted); }
+  .rate-note { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+  .rate-note strong { color: var(--text); }
+</style>
+</head>
+<body>
+<main class="demo">
+  <h1>Aliasing as a falling tone</h1>
+  <p class="instructions">
+    A tone is swept steadily <strong>upward</strong>. Sampled too sparsely, frequencies above the
+    <strong>Nyquist limit</strong> fold back down: the true tone keeps rising, but the pitch you
+    <strong>hear</strong> turns at the limit and <strong>falls</strong>. Press Start, then Sweep. Switch to
+    <strong>Band-limited</strong> to hear the same sweep rise cleanly with no fold.
+  </p>
+
+  <fieldset>
+    <legend>Step 1: enable sound</legend>
+    <div class="row">
+      <button id="start" class="start" type="button">Start / Enable Sound</button>
+      <button id="sweep" class="play" type="button" disabled>&#9658; Sweep</button>
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite">Audio is off.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Step 2: how the tone is sampled</legend>
+    <p class="rate-note">
+      Simulated sampling rate <strong>fs = 8000 Hz</strong> &middot; Nyquist limit <strong>fs &divide; 2 = 4000 Hz</strong>.
+      The sweep runs the <em>true</em> frequency from 140 Hz up past the limit to 7860 Hz.
+    </p>
+    <div class="row">
+      <button id="m-naive" class="mode-btn active" type="button">Naive sample (aliases)</button>
+      <button id="m-band" class="mode-btn" type="button">Band-limited (no aliasing)</button>
+    </div>
+    <div class="readout" style="margin-top:14px;">
+      <div class="rdg"><div class="k">True frequency</div><div class="v" id="r-true">&mdash;</div><div class="u">Hz (rising)</div></div>
+      <div class="rdg"><div class="k">Heard frequency</div><div class="v" id="r-heard">&mdash;</div><div class="u">Hz (the alias)</div></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>The foldover map (heard frequency vs true frequency)</legend>
+    <canvas id="map" width="780" height="250" role="img"
+      aria-label="Foldover map: below the Nyquist limit the heard frequency tracks the true frequency on the diagonal; above it the heard frequency reflects off the Nyquist limit and off zero, so the rising true tone is heard as a pitch that turns and falls."></canvas>
+    <p class="note">
+      Horizontal axis: the <strong>true</strong> input frequency. Vertical axis: the frequency you actually
+      <strong>hear</strong>. Below Nyquist the two match (the diagonal). Above it the heard frequency reflects off
+      the limit, then off zero, and so on &mdash; one rising input maps onto a pitch that folds up and down. The dot
+      follows the sweep as it plays.
+    </p>
+  </fieldset>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- model constants ----
+  var FS_MODEL = 8000;            // simulated (low) sampling rate
+  var NYQ = FS_MODEL / 2;         // 4000 Hz
+  var F_START = 140;              // true freq at sweep start
+  var F_END = 2 * FS_MODEL - F_START; // 15860; audio uses only the first turnaround (see SWEEP_END)
+  var SWEEP_END = FS_MODEL - F_START; // 7860 Hz: one clean audible turnaround (rise to NYQ, fold back to F_START)
+  var DUR = 8.0;                  // seconds
+  var X_MAX = 2 * FS_MODEL;       // plot the true-frequency axis to 16000 so the repeating triangle shows
+  var Y_MAX = NYQ * 1.05;         // a little headroom above Nyquist on the heard axis
+
+  var ctx = null, master = null;
+  var mode = "naive";            // "naive" | "band"
+  var naiveBuf = null;
+  var voice = null;              // current AudioBufferSourceNode or OscillatorNode
+  var playing = false;
+  var startedAt = 0;             // ctx time the sweep began
+  var raf = 0;
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(t) { $("status").textContent = t; }
+
+  // Folded ("heard") frequency for a true frequency f sampled at fs.
+  function aliasFreq(f, fs) {
+    var n = fs / 2;
+    var m = f % fs;          // 0..fs
+    if (m < 0) m += fs;
+    return m <= n ? m : fs - m;
+  }
+
+  // Naive non-band-limited sampling of the rising sine, baked at FS_MODEL so it
+  // genuinely aliases. A short raised-cosine fade in/out avoids edge clicks.
+  function buildNaiveBuffer() {
+    var len = Math.ceil(DUR * FS_MODEL);
+    var buf = ctx.createBuffer(1, len, FS_MODEL);
+    var d = buf.getChannelData(0);
+    var fade = Math.floor(0.02 * FS_MODEL); // 20 ms
+    var phase = 0;
+    for (var i = 0; i < len; i++) {
+      var t = i / FS_MODEL;
+      var f = F_START + (SWEEP_END - F_START) * (t / DUR); // linear true-frequency chirp
+      phase += 2 * Math.PI * f / FS_MODEL;                 // integrate instantaneous frequency
+      var env = 1;
+      if (i < fade) env = 0.5 - 0.5 * Math.cos(Math.PI * i / fade);
+      else if (i > len - fade) env = 0.5 - 0.5 * Math.cos(Math.PI * (len - i) / fade);
+      d[i] = Math.sin(phase) * env * 0.9;
+    }
+    return buf;
+  }
+
+  function buildGraph() {
+    master = ctx.createGain();
+    master.gain.value = 0.32;
+    Shell.connectMaster(ctx, master);   // safety limiter -> destination
+    naiveBuf = buildNaiveBuffer();
+  }
+
+  function stopVoice() {
+    if (voice) { try { voice.stop(); } catch (e) {} voice = null; }
+  }
+
+  function startSweep() {
+    stopVoice();
+    var t0 = ctx.currentTime + 0.03;
+    if (mode === "naive") {
+      var src = ctx.createBufferSource();
+      src.buffer = naiveBuf;
+      src.connect(master);
+      src.onended = onSweepEnd;
+      src.start(t0);
+      voice = src;
+    } else {
+      // Same true-frequency sweep through a band-limited oscillator: no fold.
+      var osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(F_START, t0);
+      osc.frequency.linearRampToValueAtTime(SWEEP_END, t0 + DUR);
+      var g = ctx.createGain();
+      g.gain.setValueAtTime(0.0, t0);
+      g.gain.linearRampToValueAtTime(0.9, t0 + 0.02);
+      g.gain.setValueAtTime(0.9, t0 + DUR - 0.02);
+      g.gain.linearRampToValueAtTime(0.0, t0 + DUR);
+      osc.connect(g).connect(master);
+      osc.onended = onSweepEnd;
+      osc.start(t0);
+      osc.stop(t0 + DUR + 0.02);
+      voice = osc;
+    }
+    playing = true;
+    startedAt = t0;
+    $("sweep").innerHTML = "&#9632; Stop";
+    setStatus(mode === "naive"
+      ? "Sweeping. The true tone rises past 4000 Hz; the pitch you hear turns and falls."
+      : "Sweeping (band-limited). The tone rises cleanly and just keeps going up.");
+    loop();
+  }
+
+  function onSweepEnd() {
+    if (!playing) return;
+    playing = false;
+    $("sweep").innerHTML = "&#9658; Sweep";
+    setStatus("Done. Press Sweep again, or switch the sampling mode and compare.");
+    cancelAnimationFrame(raf);
+    draw(-1); // clear playhead, keep the map
+  }
+
+  function stopSweep() {
+    stopVoice();
+    onSweepEnd();
+  }
+
+  // ---- foldover map ----
+  var PAD_L = 46, PAD_R = 14, PAD_T = 14, PAD_B = 30;
+
+  function xPix(c, f) { return PAD_L + (f / X_MAX) * (c.width - PAD_L - PAD_R); }
+  function yPix(c, f) { return c.height - PAD_B - (f / Y_MAX) * (c.height - PAD_T - PAD_B); }
+
+  function draw(progress) {
+    var c = $("map"), g = c.getContext("2d");
+    var W = c.width, H = c.height;
+    g.clearRect(0, 0, W, H);
+
+    // axes
+    g.strokeStyle = "#C9C9CF"; g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(PAD_L, PAD_T); g.lineTo(PAD_L, H - PAD_B); g.lineTo(W - PAD_R, H - PAD_B);
+    g.stroke();
+
+    g.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    g.fillStyle = "#52525B";
+    g.textAlign = "center";
+    // x ticks at Nyquist, fs, 1.5 fs, 2 fs
+    var xticks = [
+      { f: NYQ, t: "4k" }, { f: FS_MODEL, t: "8k (fs)" },
+      { f: 1.5 * FS_MODEL, t: "12k" }, { f: 2 * FS_MODEL, t: "16k" }
+    ];
+    xticks.forEach(function (tk) {
+      var x = xPix(c, tk.f);
+      g.strokeStyle = "#E4E4E8"; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, PAD_T); g.lineTo(x, H - PAD_B); g.stroke();
+      g.fillText(tk.t, x, H - PAD_B + 14);
+    });
+    g.textAlign = "left";
+    g.fillText("true frequency in →", PAD_L + 2, H - 6);
+
+    // Nyquist horizontal line (heard axis ceiling)
+    var yN = yPix(c, NYQ);
+    g.strokeStyle = "#C2410C"; g.lineWidth = 1.2; g.setLineDash([5, 4]);
+    g.beginPath(); g.moveTo(PAD_L, yN); g.lineTo(W - PAD_R, yN); g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = "#C2410C"; g.textAlign = "left";
+    g.fillText("Nyquist 4000 Hz", PAD_L + 6, yN - 5);
+    // heard-axis label
+    g.save();
+    g.translate(14, (H - PAD_B + PAD_T) / 2); g.rotate(-Math.PI / 2);
+    g.fillStyle = "#52525B"; g.textAlign = "center";
+    g.fillText("heard frequency ↑", 0, 0);
+    g.restore();
+
+    // faint identity diagonal (heard = true, valid below Nyquist)
+    g.strokeStyle = "#B8C4E8"; g.lineWidth = 1; g.setLineDash([3, 3]);
+    g.beginPath();
+    g.moveTo(xPix(c, 0), yPix(c, 0));
+    g.lineTo(xPix(c, Y_MAX), yPix(c, Y_MAX));
+    g.stroke();
+    g.setLineDash([]);
+
+    if (mode === "naive") {
+      // the foldover triangle: heard = aliasFreq(true)
+      g.strokeStyle = "#15803D"; g.lineWidth = 2.4;
+      g.beginPath();
+      for (var f = 0; f <= X_MAX; f += X_MAX / 600) {
+        var x = xPix(c, f), y = yPix(c, aliasFreq(f, FS_MODEL));
+        if (f === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      }
+      g.stroke();
+    } else {
+      // band-limited: heard = true; rises off the top of the chart at Nyquist
+      g.strokeStyle = "#15803D"; g.lineWidth = 2.4;
+      g.beginPath();
+      g.moveTo(xPix(c, 0), yPix(c, 0));
+      g.lineTo(xPix(c, Y_MAX), yPix(c, Y_MAX));
+      g.stroke();
+      g.fillStyle = "#15803D"; g.textAlign = "left";
+      g.fillText("rises off the top — no fold", xPix(c, NYQ) + 8, PAD_T + 12);
+    }
+
+    // playhead
+    if (progress >= 0) {
+      var tf = F_START + (SWEEP_END - F_START) * progress;
+      var hf = (mode === "naive") ? aliasFreq(tf, FS_MODEL) : tf;
+      var px = xPix(c, tf);
+      var py = yPix(c, Math.min(hf, Y_MAX));
+      // guide from x-axis up to the point
+      g.strokeStyle = "rgba(29,78,216,0.35)"; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(px, H - PAD_B); g.lineTo(px, py); g.stroke();
+      g.fillStyle = "#1D4ED8";
+      g.beginPath(); g.arc(px, py, 5, 0, 2 * Math.PI); g.fill();
+
+      $("r-true").textContent = Math.round(tf);
+      $("r-heard").textContent = Math.round(hf);
+    }
+  }
+
+  function loop() {
+    if (!playing) return;
+    var elapsed = ctx.currentTime - startedAt;
+    var progress = Math.max(0, Math.min(1, elapsed / DUR));
+    draw(progress);
+    if (progress >= 1) { return; }
+    raf = requestAnimationFrame(loop);
+  }
+
+  // ---- mode buttons ----
+  function selectMode(m) {
+    mode = m;
+    $("m-naive").classList.toggle("active", m === "naive");
+    $("m-band").classList.toggle("active", m === "band");
+    if (playing) { stopSweep(); }
+    draw(-1);
+  }
+  $("m-naive").addEventListener("click", function () { selectMode("naive"); });
+  $("m-band").addEventListener("click", function () { selectMode("band"); });
+
+  // ---- transport ----
+  $("start").addEventListener("click", function () {
+    if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); buildGraph(); draw(-1); }
+    Shell.gate(ctx, $("start"), function () {
+      $("sweep").disabled = false; $("start").disabled = true;
+      setStatus("Sound is on. Press Sweep, then compare Naive against Band-limited.");
+    });
+  });
+  $("sweep").addEventListener("click", function () {
+    if (!ctx) return;
+    if (playing) { stopSweep(); } else { startSweep(); }
+  });
+
+  // Draw the static foldover map on load (no audio needed) so the relationship
+  // is visible before Start, and toggling modes previews it.
+  draw(-1);
+})();
+</script>
+</body>
+</html>
